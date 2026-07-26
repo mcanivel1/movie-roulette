@@ -13,7 +13,7 @@ function statusFor(movie) {
   return { key: 'locked', label: movie.waitingOn ? `Waiting on ${movie.waitingOn}` : 'Waiting' };
 }
 
-export default function LibraryView({ movies, onToggleWatched, active }) {
+export default function LibraryView({ movies, onToggleWatched, active, pendingId }) {
   const [filter, setFilter] = useState('all');
 
   const watchedCount = movies.filter((m) => m.watched).length;
@@ -48,6 +48,7 @@ export default function LibraryView({ movies, onToggleWatched, active }) {
         <div className="grid">
           {list.map((movie) => {
             const st = statusFor(movie);
+            const isPending = movie.id === pendingId;
             return (
               <div className="card" key={movie.id}>
                 <div className={`card-poster${st.key === 'locked' ? ' locked' : ''}`}>
@@ -65,10 +66,16 @@ export default function LibraryView({ movies, onToggleWatched, active }) {
                     ) : null}
                   </div>
                   <button
-                    className={`card-action${movie.watched ? ' is-watched' : ''}`}
+                    className={`card-action${movie.watched ? ' is-watched' : ''}${isPending ? ' is-pending' : ''}`}
+                    disabled={isPending}
                     onClick={() => onToggleWatched(movie.id, !movie.watched)}
                   >
-                    {movie.watched ? 'Mark as Unwatched' : 'Mark as Watched'}
+                    {isPending ? (
+                      <>
+                        <span className="spinner" aria-hidden="true" />
+                        Marking&hellip;
+                      </>
+                    ) : movie.watched ? 'Mark as Unwatched' : 'Mark as Watched'}
                   </button>
                 </div>
               </div>

@@ -557,6 +557,10 @@ body {
 .card-action {
   margin-top: auto;
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1.5px solid var(--line-strong);
   background: transparent;
   color: var(--ink);
@@ -578,6 +582,23 @@ body {
   color: #8a6100;
 }
 .card-action.is-watched:hover { color: var(--coral); border-color: var(--coral); background: transparent; }
+.card-action.is-pending {
+  cursor: default;
+  opacity: 0.75;
+  color: var(--muted);
+}
+.card-action.is-pending:hover { border-color: var(--line-strong); color: var(--muted); background: transparent; }
+
+.spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  opacity: 0.7;
+  animation: spin 700ms linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 
 @media (max-width: 640px) {
   /* The auto-fill grid collapses to a single column on phone widths

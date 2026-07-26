@@ -8,6 +8,7 @@ export default function App() {
   const [movies, setMovies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [pendingId, setPendingId] = useState(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -26,17 +27,22 @@ export default function App() {
   }, [refresh]);
 
   async function handleToggleWatched(id, watched) {
-    // Optimistic update so the Library grid feels instant; refresh() below
-    // reconciles with the source of truth (also recomputes eligible/waitingOn
-    // for any downstream sequels).
-    setMovies((prev) => prev.map((m) => (m.id === id ? { ...m, watched } : m)));
+    // No optimistic flip here on purpose: this movie's own watched state
+    // isn't the only thing that can change -- a sequel's eligible/waitingOn
+    // depends on it too, and that only becomes correct once refresh() has
+    // actually re-read the sheet. Flipping this button instantly (while
+    // dependent cards elsewhere hadn't caught up yet) read as a bug, so
+    // instead the clicked card shows a pending/spinner state and every
+    // card updates together, once, when the real result comes back.
+    setPendingId(id);
     try {
       await setWatched(id, watched);
     } catch {
-      // Optimistic update above gets rolled back by refresh() below
-      // regardless (network failure, bad token, stale id, ...).
+      // refresh() below reflects whatever the real state actually is
+      // regardless of whether this call succeeded.
     } finally {
-      refresh();
+      await refresh();
+      setPendingId(null);
     }
   }
 
@@ -71,7 +77,7 @@ export default function App() {
                 conditionally rendering one or the other would unmount and
                 reset it every time. Visibility is CSS-driven via `active`. */}
             <RouletteView movies={movies} onRefreshMovies={refresh} active={tab === 'roulette'} />
-            <LibraryView movies={movies} onToggleWatched={handleToggleWatched} active={tab === 'library'} />
+            <LibraryView movies={movies} onToggleWatched={handleToggleWatched} active={tab === 'library'} pendingId={pendingId} />
           </>
         )}
       </main>
