@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useLayoutEffect, useRef, useState } from 'react';
 
 /**
  * Renders the poster art for a movie inside whatever ticket-card chrome the
@@ -15,25 +15,27 @@ export default function PosterImage({ movie }) {
   const [status, setStatus] = useState(hasUrl ? 'loading' : 'unavailable');
   const imgRef = useRef(null);
 
-  // Reset load state when the underlying movie/poster changes (e.g. deck
-  // cycling through candidates, or a Sheet edit resolving a poster later).
-  useEffect(() => {
-    setStatus(movie.posterUrl ? 'loading' : 'unavailable');
-  }, [movie.posterUrl, movie.id]);
-
-  // Cache race: if the browser already has this image cached (very likely
-  // during the deck's rapid shuffle, which loads several posters back to
-  // back), it can fire `load` before the onLoad handler below is attached
-  // for this render, leaving status stuck at 'loading' forever even though
-  // the image is genuinely there. useLayoutEffect runs after the <img>'s
-  // src is committed to the DOM but before paint, so checking `.complete`
-  // here catches the already-cached case synchronously; onLoad/onError
-  // below still handle the normal (not-yet-cached) async case.
+  // Reset AND check-if-already-cached both happen here, synchronously, in
+  // one layout effect -- not split across a passive useEffect (reset) and
+  // a separate useLayoutEffect (cache check). Splitting them left a window
+  // during rapid deck shuffling where a render could commit the *new*
+  // movie's <img src> while `status` (and its 'is-loaded' class) was still
+  // whatever the *previous* movie had left behind, since the passive
+  // effect resetting it only runs after paint. That showed up as a blank
+  // flash: a fully-opaque, not-yet-loaded image. Resetting first and then
+  // upgrading to 'loaded' if already cached -- all before paint -- means
+  // there's no state for a stale status to ever be visible in.
   useLayoutEffect(() => {
+    if (!movie.posterUrl) {
+      setStatus('unavailable');
+      return;
+    }
     if (imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
       setStatus('loaded');
+    } else {
+      setStatus('loading');
     }
-  }, [movie.posterUrl]);
+  }, [movie.posterUrl, movie.id]);
 
   if (!hasUrl || status === 'unavailable') {
     return (
