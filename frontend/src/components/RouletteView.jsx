@@ -33,6 +33,21 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
 
   useEffect(() => () => { timeouts.current.forEach(clearTimeout); }, []);
 
+  // Warm the browser's image cache for every possible decoy well before any
+  // spin happens. Without this, a decoy tick can land on a poster that
+  // hasn't finished loading yet -- it shows a skeleton, then the real image
+  // pops in late in that tick's ~90ms hold (sometimes barely before the
+  // next tick's flick-out already starts), so that one card visibly gets
+  // less hold time than the others and the shuffle reads as briefly
+  // speeding up. Preloading means PosterImage's cache check almost always
+  // resolves synchronously, so every tick gets its full, even hold time.
+  useEffect(() => {
+    movies.filter((m) => m.eligible && m.posterUrl).forEach((m) => {
+      const img = new Image();
+      img.src = m.posterUrl;
+    });
+  }, [movies]);
+
   function scheduleTimeout(fn, ms) {
     const id = setTimeout(fn, ms);
     timeouts.current.push(id);
