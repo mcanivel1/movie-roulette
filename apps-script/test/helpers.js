@@ -43,8 +43,12 @@ function loadGasContext(filenames, extraGlobals) {
  * getDataRange().getValues(), getLastColumn(), and
  * getRange(row, col[, numRows, numCols]).getValues()/getValue()/setValue().
  */
-function createMockSheet(initialValues) {
+function createMockSheet(initialValues, options) {
   const data = initialValues.map((row) => row.slice());
+  // Simulates a Sheets data-validation rule (e.g. a "Yes"/"No" dropdown)
+  // that rejects boolean writes to specific 1-indexed columns, matching
+  // what a real validated cell does when you setValue() the wrong type.
+  const rejectBooleanColumns = (options && options.rejectBooleanColumns) || [];
 
   function getRange(row, col, numRows, numCols) {
     const rows = numRows === undefined ? 1 : numRows;
@@ -68,6 +72,12 @@ function createMockSheet(initialValues) {
         return v === undefined ? '' : v;
       },
       setValue(value) {
+        if (typeof value === 'boolean' && rejectBooleanColumns.indexOf(col) !== -1) {
+          throw new Error(
+            'Exception: The data you entered in cell violates the data validation ' +
+            'rules set on this cell. Please enter one of the following values: Yes, No.'
+          );
+        }
         while (data.length < row) data.push([]);
         while (data[row - 1].length < col) data[row - 1].push('');
         data[row - 1][col - 1] = value;
@@ -104,6 +114,7 @@ function createMockPropertiesService(props) {
 }
 
 function createMockSpreadsheetApp(sheet) {
+  const flushCalls = { count: 0 };
   return {
     openById(_id) {
       return {
@@ -111,7 +122,17 @@ function createMockSpreadsheetApp(sheet) {
           return [sheet];
         }
       };
-    }
+    },
+    flush() {
+      // No-op effect (the mock sheet's setValue() is already synchronous,
+      // unlike real Apps Script which can batch/defer writes) -- but call
+      // count is tracked so tests can assert Code.js still calls this after
+      // writing the Watched cell. Skipping it is exactly what let a write
+      // failure surface later as an unrelated-looking read exception in
+      // production instead of being catchable at the write site.
+      flushCalls.count++;
+    },
+    _flushCalls: flushCalls
   };
 }
 

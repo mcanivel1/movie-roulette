@@ -39,11 +39,12 @@ function tmdbResponder(url) {
   return { results: [] };
 }
 
-function setUp(sheetValues) {
-  const sheet = createMockSheet(sheetValues || buildSheetValues());
+function setUp(sheetValues, sheetOptions) {
+  const sheet = createMockSheet(sheetValues || buildSheetValues(), sheetOptions);
   const fetchMock = createMockUrlFetchApp(tmdbResponder);
+  const spreadsheetAppMock = createMockSpreadsheetApp(sheet);
   const context = loadGasContext(['Logic.js', 'Code.js'], {
-    SpreadsheetApp: createMockSpreadsheetApp(sheet),
+    SpreadsheetApp: spreadsheetAppMock,
     PropertiesService: createMockPropertiesService({
       SPREADSHEET_ID,
       SHARED_TOKEN,
@@ -53,7 +54,7 @@ function setUp(sheetValues) {
     ContentService: mockContentService,
     console
   });
-  return { sheet, fetchMock, context };
+  return { sheet, fetchMock, context, spreadsheetAppMock };
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +162,7 @@ test('doGet spin: empty eligible pool returns {movie: null}, not an error', () =
 // ---------------------------------------------------------------------------
 
 test('doPost setWatched: marks a row watched and returns the updated movie', () => {
-  const { context, sheet } = setUp();
+  const { context, sheet, spreadsheetAppMock } = setUp();
   const res = context.doPost({
     postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setWatched', id: 3, watched: true }) }
   });
@@ -172,6 +173,32 @@ test('doPost setWatched: marks a row watched and returns the updated movie', () 
 
   const watchedColIdx = HEADER.indexOf('Watched');
   assert.equal(sheet._snapshot()[2][watchedColIdx], true);
+
+  // Regression guard: writeWatchedCell_ must force a synchronous flush
+  // after writing. Without it, a validation failure on the write can defer
+  // and resurface later as an unrelated-looking exception from whatever
+  // next touches the sheet, instead of being catchable at the write site.
+  assert.ok(spreadsheetAppMock._flushCalls.count >= 1, 'expected SpreadsheetApp.flush() to be called after writing the Watched cell');
+});
+
+test('doPost setWatched: falls back to a "Yes"/"No" string when the Watched column is validated as text (not a boolean checkbox)', () => {
+  // Reproduces a real deployment: a "Watched" column with Sheets data
+  // validation restricting it to the literal strings Yes/No throws when
+  // you setValue(true) -- writeWatchedCell_ must catch that and retry with
+  // the string form instead of letting the write silently fail.
+  const watchedColIdx = HEADER.indexOf('Watched'); // 0-indexed
+  const { context, sheet, spreadsheetAppMock } = setUp(buildSheetValues(), { rejectBooleanColumns: [watchedColIdx + 1] });
+
+  const res = context.doPost({
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setWatched', id: 3, watched: true }) }
+  });
+  const body = res.json();
+
+  assert.equal(body.error, undefined, 'setWatched should succeed, not fall through to sheet_error');
+  assert.equal(body.movie.id, 3);
+  assert.equal(body.movie.watched, true, 'the response should still report watched:true (boolean) regardless of how it was stored');
+  assert.equal(sheet._snapshot()[2][watchedColIdx], 'Yes', 'the cell itself should hold the Yes/No string this column actually validates');
+  assert.equal(spreadsheetAppMock._flushCalls.count, 1, 'flush should happen once, after the successful retry -- not once per attempt');
 });
 
 test('doPost setWatched: marking a prequel watched unlocks the sequel on the next read', () => {

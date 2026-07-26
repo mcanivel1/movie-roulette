@@ -115,6 +115,31 @@ function spinMovie_(sheet, props) {
   return toPublicMovie(picked, posterUrl);
 }
 
+/**
+ * Write the Watched cell. Sheets commonly represent this column one of two
+ * ways: a native checkbox (real boolean TRUE/FALSE) or a "Yes"/"No" text
+ * dropdown (data validation on string values) -- writing a boolean into a
+ * Yes/No-validated cell throws. Try the boolean first (the documented,
+ * recommended format) and fall back to the Yes/No string on a validation
+ * error, so either sheet setup works without extra configuration.
+ *
+ * The explicit flush() after each attempt matters: Apps Script can batch/
+ * defer Sheets writes, so without forcing a synchronous commit here, a
+ * validation failure on the first (boolean) attempt can surface later as an
+ * unrelated-looking exception from whatever next touches the sheet (we saw
+ * this manifest as the *next read* throwing this cell's validation error)
+ * instead of being catchable right here where we can actually retry.
+ */
+function writeWatchedCell_(sheet, row, column, watchedValue) {
+  try {
+    sheet.getRange(row, column).setValue(watchedValue);
+    SpreadsheetApp.flush();
+  } catch (err) {
+    sheet.getRange(row, column).setValue(watchedValue ? 'Yes' : 'No');
+    SpreadsheetApp.flush();
+  }
+}
+
 function setWatchedAction_(sheet, props, id, watchedValue) {
   var movies = readMovies_(sheet);
   var target = findMovieById(movies, id);
@@ -123,7 +148,7 @@ function setWatchedAction_(sheet, props, id, watchedValue) {
   var headerIndexes = resolveHeaderIndexes(readHeaderRow_(sheet));
   if (headerIndexes.watched < 0) return { error: 'sheet_error' };
 
-  sheet.getRange(id, headerIndexes.watched + 1).setValue(watchedValue);
+  writeWatchedCell_(sheet, id, headerIndexes.watched + 1, watchedValue);
 
   // Re-read after write so the response reflects the persisted state
   // (including any eligibility changes it unlocks for other rows).

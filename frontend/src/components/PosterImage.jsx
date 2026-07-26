@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 /**
  * Renders the poster art for a movie inside whatever ticket-card chrome the
@@ -13,12 +13,27 @@ import { useEffect, useState } from 'react';
 export default function PosterImage({ movie }) {
   const hasUrl = Boolean(movie.posterUrl);
   const [status, setStatus] = useState(hasUrl ? 'loading' : 'unavailable');
+  const imgRef = useRef(null);
 
   // Reset load state when the underlying movie/poster changes (e.g. deck
   // cycling through candidates, or a Sheet edit resolving a poster later).
   useEffect(() => {
     setStatus(movie.posterUrl ? 'loading' : 'unavailable');
   }, [movie.posterUrl, movie.id]);
+
+  // Cache race: if the browser already has this image cached (very likely
+  // during the deck's rapid shuffle, which loads several posters back to
+  // back), it can fire `load` before the onLoad handler below is attached
+  // for this render, leaving status stuck at 'loading' forever even though
+  // the image is genuinely there. useLayoutEffect runs after the <img>'s
+  // src is committed to the DOM but before paint, so checking `.complete`
+  // here catches the already-cached case synchronously; onLoad/onError
+  // below still handle the normal (not-yet-cached) async case.
+  useLayoutEffect(() => {
+    if (imgRef.current && imgRef.current.complete && imgRef.current.naturalWidth > 0) {
+      setStatus('loaded');
+    }
+  }, [movie.posterUrl]);
 
   if (!hasUrl || status === 'unavailable') {
     return (
@@ -32,6 +47,7 @@ export default function PosterImage({ movie }) {
     <div className="poster-img-wrap">
       {status === 'loading' && <div className="poster-skeleton" aria-hidden="true" />}
       <img
+        ref={imgRef}
         className={`poster-img${status === 'loaded' ? ' is-loaded' : ''}`}
         src={movie.posterUrl}
         alt={`${movie.title} poster`}
