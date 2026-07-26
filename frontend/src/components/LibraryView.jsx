@@ -68,7 +68,7 @@ export default function LibraryView({ movies, onToggleWatched, active }) {
                     className={`card-action${movie.watched ? ' is-watched' : ''}`}
                     onClick={() => onToggleWatched(movie.id, !movie.watched)}
                   >
-                    {movie.watched ? 'Watched — undo' : 'Mark as Watched'}
+                    {movie.watched ? 'Mark as Unwatched' : 'Mark as Watched'}
                   </button>
                 </div>
               </div>

@@ -569,8 +569,15 @@ body {
   transition: all 140ms ease;
 }
 .card-action:hover { border-color: var(--coral); color: var(--coral); }
-.card-action.is-watched { color: var(--muted); }
-.card-action.is-watched:hover { color: var(--coral); border-color: var(--coral); }
+/* Filled amber, echoing the "Watched" status pill above it on the same
+   card -- reads as the undo for that state, distinct from the plain
+   outline "Mark as Watched" button rather than just a muted color swap. */
+.card-action.is-watched {
+  background: #fff8e6;
+  border-color: #f3d788;
+  color: #8a6100;
+}
+.card-action.is-watched:hover { color: var(--coral); border-color: var(--coral); background: transparent; }
 
 /* ---------- poster art (real TMDB <img>, replaces the mockup's <canvas>) ---------- */
 .poster-img-wrap {
