@@ -579,6 +579,21 @@ body {
 }
 .card-action.is-watched:hover { color: var(--coral); border-color: var(--coral); background: transparent; }
 
+@media (max-width: 640px) {
+  /* The auto-fill grid collapses to a single column on phone widths
+     (minmax(190px,1fr) doesn't leave room for a second one), so browsing
+     the library meant one movie per screen. Force 2 columns instead and
+     scale the card content down to fit -- still shows title/year/status/
+     action, just more compactly. */
+  .grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .card { border-radius: 12px; }
+  .card-status { top: 7px; left: 7px; padding: 3px 7px; font-size: 8.5px; }
+  .card-body { padding: 9px 10px 11px; gap: 5px; }
+  .card-title { font-size: 12.5px; line-height: 1.15; }
+  .card-meta, .card-chain { font-size: 10px; }
+  .card-action { padding: 7px 8px; font-size: 10.5px; border-radius: 7px; }
+}
+
 /* ---------- poster art (real TMDB <img>, replaces the mockup's <canvas>) ---------- */
 .poster-img-wrap {
   position: relative;
