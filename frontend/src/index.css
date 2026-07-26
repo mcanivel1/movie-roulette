@@ -1,0 +1,8 @@
+/* Minimal reset — the actual design system lives in styles.css */
+:root {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+
+# clasp local auth and per-developer project binding (never commit)
+.clasprc.json
+apps-script/.clasp.json
+
+# OS
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "name": "movie-roulette-apps-script",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Apps Script backend for Movie Roulette (Google-Sheet-backed movie picker).",
+  "scripts": {
+    "test": "node --test"
+  }
+}
