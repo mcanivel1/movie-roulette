@@ -18,7 +18,7 @@ const CHIP_SHAPES = ['circle', 'square', 'tri'];
  * (stage-spin gets [hidden], reveal renders in the same .stage) rather than
  * stacking below it. "Spin Again" re-runs the same doSpin() flow.
  */
-export default function RouletteView({ movies, onRefreshMovies }) {
+export default function RouletteView({ movies, onRefreshMovies, active }) {
   const [deckMovie, setDeckMovie] = useState(null); // null => idle stub text
   const [spinning, setSpinning] = useState(false);
   const [showReveal, setShowReveal] = useState(false);
@@ -156,7 +156,7 @@ export default function RouletteView({ movies, onRefreshMovies }) {
   }
 
   return (
-    <section className="view active">
+    <section className={`view${active ? ' active' : ''}`}>
       <div className="stage">
         <div className="stage-spin" hidden={showReveal}>
           <div className="deck" ref={deckElRef}>

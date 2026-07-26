@@ -111,7 +111,12 @@ body {
 }
 
 /* ---------- views ---------- */
-.view { animation: fadeUp 420ms cubic-bezier(.2, .7, .2, 1); }
+/* Both views stay mounted (see App.jsx) so RouletteView's in-progress spin/
+   reveal state survives switching to Library and back -- visibility is
+   toggled with this class instead of conditional rendering, which would
+   unmount and destroy that state. */
+.view { display: none; }
+.view.active { display: block; animation: fadeUp 420ms cubic-bezier(.2, .7, .2, 1); }
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }

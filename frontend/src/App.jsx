@@ -64,10 +64,15 @@ export default function App() {
           <p className="loading-note">Loading movies…</p>
         ) : error ? (
           <p className="loading-note">{error}</p>
-        ) : tab === 'roulette' ? (
-          <RouletteView movies={movies} onRefreshMovies={refresh} />
         ) : (
-          <LibraryView movies={movies} onToggleWatched={handleToggleWatched} />
+          <>
+            {/* Both views stay mounted so RouletteView's in-progress spin/
+                reveal state survives switching to Library and back --
+                conditionally rendering one or the other would unmount and
+                reset it every time. Visibility is CSS-driven via `active`. */}
+            <RouletteView movies={movies} onRefreshMovies={refresh} active={tab === 'roulette'} />
+            <LibraryView movies={movies} onToggleWatched={handleToggleWatched} active={tab === 'library'} />
+          </>
         )}
       </main>
 

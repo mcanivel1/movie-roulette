@@ -13,7 +13,7 @@ function statusFor(movie) {
   return { key: 'locked', label: movie.waitingOn ? `Waiting on ${movie.waitingOn}` : 'Waiting' };
 }
 
-export default function LibraryView({ movies, onToggleWatched }) {
+export default function LibraryView({ movies, onToggleWatched, active }) {
   const [filter, setFilter] = useState('all');
 
   const watchedCount = movies.filter((m) => m.watched).length;
@@ -27,7 +27,7 @@ export default function LibraryView({ movies, onToggleWatched }) {
   });
 
   return (
-    <section className="view active">
+    <section className={`view${active ? ' active' : ''}`}>
       <div className="library-controls">
         <div className="segmented">
           {FILTERS.map((f) => (
