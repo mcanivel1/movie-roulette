@@ -95,31 +95,63 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
     setSpinError(null);
     setMarkStatus('idle');
 
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // Fire the network request without awaiting it yet, so the shuffle can
+    // start immediately in parallel instead of sitting idle until it
+    // resolves -- the request's latency (Apps Script's redirect hop, a
+    // full sheet re-read, sometimes a live TMDB lookup) gets absorbed into
+    // motion you're already watching rather than being a dead pause before
+    // anything moves.
+    const spinPromise = spinApi();
+
+    // Indefinite decoy shuffle: no fixed length, since we don't yet know
+    // how long the request will take. Runs at a constant brisk tempo (the
+    // deceleration curve below is for the *landing*, once we know the
+    // real answer and can time a satisfying finish). `cancelled` stops it
+    // cleanly once the request settles, one way or the other.
+    let cancelled = false;
+    const runDecoyTick = () => {
+      if (cancelled) return;
+      const decoy = eligibleMovies[Math.floor(Math.random() * eligibleMovies.length)];
+      swapDeck(decoy, false, reduceMotion, () => {
+        if (!cancelled) scheduleTimeout(runDecoyTick, 90);
+      });
+    };
+    if (!reduceMotion) runDecoyTick();
+
     let selected = null;
     try {
-      const res = await spinApi();
+      const res = await spinPromise;
       selected = res.movie;
     } catch (err) {
       setSpinError(err instanceof ApiError ? err.code : 'spin_failed');
     }
+    cancelled = true;
 
     if (!selected) {
-      setSpinning(false);
+      // Graceful failure: flick the deck back to its idle placeholder
+      // instead of leaving it frozen on whatever decoy happened to be
+      // showing when the request failed -- makes it clear the attempt
+      // ended, not stuck. The error line below explains why.
+      swapDeck(null, false, reduceMotion, () => setSpinning(false));
       return;
     }
 
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // Short decelerating landing run ending on the real pick. Shorter than
+    // a full spin sequence used to be, since we've already been shuffling
+    // this whole time -- this is just the "slowing down to land" tail.
     const decoys = eligibleMovies.filter((m) => m.id !== selected.id);
-    const seqLen = reduceMotion ? 1 : 9 + Math.floor(Math.random() * 4);
+    const landLen = reduceMotion ? 1 : 5 + Math.floor(Math.random() * 3);
     const sequence = [];
-    for (let i = 0; i < seqLen - 1; i++) {
+    for (let i = 0; i < landLen - 1; i++) {
       sequence.push(decoys.length ? decoys[Math.floor(Math.random() * decoys.length)] : selected);
     }
     sequence.push(selected);
 
     const delays = [];
-    for (let d = 0; d < seqLen; d++) {
-      delays.push(reduceMotion ? 0 : Math.round(70 + (d / seqLen) * (d / seqLen) * 230));
+    for (let d = 0; d < landLen; d++) {
+      delays.push(reduceMotion ? 0 : Math.round(90 + (d / landLen) * (d / landLen) * 220));
     }
 
     let idx = 0;
