@@ -683,3 +683,64 @@ test('QA: a Gemini prompt-level block (promptFeedback.blockReason, no candidates
   const quotesPutCalls = cacheServiceMock.calls.filter((c) => c.op === 'put' && c.key.startsWith('quotes:'));
   assert.equal(quotesPutCalls.length, 0, 'a prompt-level block must not be cached either, same as a candidate-level block');
 });
+
+// ---------------------------------------------------------------------------
+// Rating header alias (bug 1 fix): must be an exact case-insensitive/trimmed
+// match on "rating" or "ratings" specifically -- not a loose substring match
+// that would also catch an unrelated column that merely contains "rating"
+// somewhere in its name (e.g. a hypothetical future "Co-rating" or "Average
+// Rating (IMDb)" column). Confirmed via code read that the fix is a switch
+// with two literal `case` labels, not `.includes('rating')` -- this test
+// locks that in so a future refactor can't accidentally loosen it.
+// ---------------------------------------------------------------------------
+
+test('QA: the "rating"/"ratings" header alias is an exact match, not a substring match -- an unrelated column merely containing "rating" is ignored', () => {
+  const { loadGasContext: load } = require('./helpers');
+  const ctx = load(['Logic.js']);
+
+  // Columns that contain "rating"/"ratings" as a substring but are not
+  // themselves the rating column -- none of these should resolve.
+  const header = ['Movie', 'Co-rating', 'Average Rating (IMDb)', 'Star Ratings Note', 'Ratings Explained'];
+  const idx = ctx.resolveHeaderIndexes(header);
+  assert.equal(idx.rating, -1, 'no column merely containing "rating"/"ratings" as a substring should resolve as the Rating column');
+});
+
+test('QA: "rating"/"ratings" alias still resolves correctly when a decoy substring column sits right next to the real one', () => {
+  const { loadGasContext: load } = require('./helpers');
+  const ctx = load(['Logic.js']);
+  const header = ['Movie', 'Co-rating', 'Ratings', 'Average Rating (IMDb)'];
+  const idx = ctx.resolveHeaderIndexes(header);
+  assert.equal(idx.rating, 2, 'the real "Ratings" column must still resolve correctly even with substring-decoy columns on both sides');
+});
+
+// ---------------------------------------------------------------------------
+// TMDB year-matching (bug 2 fix): when the year-matched result itself has no
+// poster_path (a real TMDB possibility -- some entries are metadata-only),
+// selectTmdbResultByYear must NOT fall through to a different, wrong-year
+// result just because that one happens to have art. Correctness (the right
+// movie) takes priority over "some poster, even if it's the wrong movie's" --
+// the same principle the whole fix exists for.
+// ---------------------------------------------------------------------------
+
+test('QA: a year-matched TMDB result with no poster_path resolves to posterUrl: null, not a different (wrong-year) result\'s poster', () => {
+  const values = [HEADER_V2, [false, 'Cinderella', 1950, '', '', '', true, true, true, true, true, true, true, true]];
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) return { results: {} };
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '[]' }] } }] };
+    }
+    return {
+      results: [
+        { id: 11224, poster_path: '/2015-poster.jpg', release_date: '2015-03-13' }, // wrong year, HAS art
+        { id: 12345, poster_path: null, release_date: '1950-02-15' } // right year, NO art
+      ]
+    };
+  };
+  const { context, sheet } = setUpV2(values, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list' } });
+  const movie = res.json().movies[0];
+  assert.equal(movie.posterUrl, null, 'must not silently substitute the wrong-year 2015 poster just because the correct 1950 entry lacks art');
+
+  const posterColIdx = HEADER_V2.indexOf('Poster URL');
+  assert.equal(sheet._snapshot()[1][posterColIdx], 'none', 'the "no match" sentinel should be cached, not the wrong-year URL');
+});

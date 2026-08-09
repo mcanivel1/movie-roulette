@@ -51,6 +51,24 @@ test('resolveHeaderIndexes: resolves Rating and all 8 member columns, case-insen
   assert.deepEqual(idx.members, { Austin: 2, Eugie: 3, Josh: 4, Jouissance: 5, Lynda: 6, Marvin: 7, Mel: 8, Michelle: 9 });
 });
 
+test('resolveHeaderIndexes: also accepts the plural "Ratings" header (real deployment used this spelling)', () => {
+  const header = ['Movie', 'Ratings'];
+  const idx = ctx.resolveHeaderIndexes(header);
+  assert.equal(idx.rating, 1);
+});
+
+test('resolveHeaderIndexes: "Ratings" is case-insensitive/trimmed same as every other header', () => {
+  const header = ['Movie', ' RATINGS '];
+  const idx = ctx.resolveHeaderIndexes(header);
+  assert.equal(idx.rating, 1);
+});
+
+test('resolveHeaderIndexes: singular "Rating" still resolves unchanged (widening, not a breaking rename)', () => {
+  const header = ['Movie', 'Rating'];
+  const idx = ctx.resolveHeaderIndexes(header);
+  assert.equal(idx.rating, 1);
+});
+
 // ---------------------------------------------------------------------------
 // Row parsing end-to-end
 // ---------------------------------------------------------------------------
@@ -271,6 +289,72 @@ test('buildTmdbSearchUrl: encodes title/year into the query', () => {
   assert.match(url, /api_key=KEY123/);
   assert.match(url, /query=Harbor%20Lights%20III%3A%20Undertow/);
   assert.match(url, /year=2021/);
+});
+
+// ---------------------------------------------------------------------------
+// TMDB multi-result year disambiguation (real-world bug: "Cinderella" has
+// entries from 1950, 1997, 2015, 2021, and more -- results[0] alone is not
+// reliable). Fixture below mirrors that shape.
+// ---------------------------------------------------------------------------
+
+const CINDERELLA_RESULTS = [
+  { id: 11224, poster_path: '/2015-poster.jpg', release_date: '2015-03-13' }, // results[0]: most popular, but not always the target year
+  { id: 12345, poster_path: '/1950-poster.jpg', release_date: '1950-02-15' },
+  { id: 67890, poster_path: '/2021-poster.jpg', release_date: '2021-09-03' }
+];
+
+test('selectTmdbResultByYear: picks the entry whose release_date year matches targetYear, ignoring result order', () => {
+  assert.equal(ctx.selectTmdbResultByYear(CINDERELLA_RESULTS, 1950).id, 12345);
+  assert.equal(ctx.selectTmdbResultByYear(CINDERELLA_RESULTS, 2021).id, 67890);
+  assert.equal(ctx.selectTmdbResultByYear(CINDERELLA_RESULTS, 2015).id, 11224);
+});
+
+test('selectTmdbResultByYear: no result matches targetYear -> falls back to results[0]', () => {
+  assert.equal(ctx.selectTmdbResultByYear(CINDERELLA_RESULTS, 1997).id, 11224);
+});
+
+test('selectTmdbResultByYear: targetYear null/undefined -> falls back to results[0] (existing behavior preserved)', () => {
+  assert.equal(ctx.selectTmdbResultByYear(CINDERELLA_RESULTS, null).id, 11224);
+  assert.equal(ctx.selectTmdbResultByYear(CINDERELLA_RESULTS, undefined).id, 11224);
+});
+
+test('selectTmdbResultByYear: tolerates a blank/missing release_date on some entries without crashing', () => {
+  const results = [{ id: 1, release_date: '' }, { id: 2, release_date: '2010-01-01' }, { id: 3 }];
+  assert.equal(ctx.selectTmdbResultByYear(results, 2010).id, 2);
+  assert.equal(ctx.selectTmdbResultByYear(results, 1999).id, 1); // no match -> results[0]
+});
+
+test('selectTmdbResultByYear: empty/malformed results returns null', () => {
+  assert.equal(ctx.selectTmdbResultByYear([], 2010), null);
+  assert.equal(ctx.selectTmdbResultByYear(null, 2010), null);
+});
+
+test('parseTmdbSearchResponse: with a target year, picks the year-matched result over results[0]', () => {
+  const result = ctx.parseTmdbSearchResponse({ results: CINDERELLA_RESULTS }, 1950);
+  assert.equal(result.posterUrl, 'https://image.tmdb.org/t/p/w500/1950-poster.jpg');
+  assert.equal(result.cacheValue, 'https://image.tmdb.org/t/p/w500/1950-poster.jpg');
+});
+
+test('parseTmdbSearchResponse: no result matches the target year -> falls back to results[0], not "no match"', () => {
+  const result = ctx.parseTmdbSearchResponse({ results: CINDERELLA_RESULTS }, 1997);
+  assert.equal(result.posterUrl, 'https://image.tmdb.org/t/p/w500/2015-poster.jpg');
+});
+
+test('parseTmdbSearchResponse: no year on the row at all -> falls back to results[0] (existing behavior preserved)', () => {
+  const result = ctx.parseTmdbSearchResponse({ results: CINDERELLA_RESULTS }, null);
+  assert.equal(result.posterUrl, 'https://image.tmdb.org/t/p/w500/2015-poster.jpg');
+});
+
+test('extractTmdbMovieId: with a target year, picks the year-matched result\'s id over results[0]', () => {
+  assert.equal(ctx.extractTmdbMovieId({ results: CINDERELLA_RESULTS }, 2021), 67890);
+});
+
+test('extractTmdbMovieId: no result matches the target year -> falls back to results[0]\'s id', () => {
+  assert.equal(ctx.extractTmdbMovieId({ results: CINDERELLA_RESULTS }, 1997), 11224);
+});
+
+test('extractTmdbMovieId: no year on the row at all -> falls back to results[0]\'s id (existing behavior preserved)', () => {
+  assert.equal(ctx.extractTmdbMovieId({ results: CINDERELLA_RESULTS }, undefined), 11224);
 });
 
 // ---------------------------------------------------------------------------

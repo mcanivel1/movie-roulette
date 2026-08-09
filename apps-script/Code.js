@@ -98,7 +98,7 @@ function resolvePosterForMovie_(sheet, props, movie) {
     var searchUrl = buildTmdbSearchUrl(props.tmdbApiKey, movie.title, movie.year);
     var response = UrlFetchApp.fetch(searchUrl, { muteHttpExceptions: true });
     var json = JSON.parse(response.getContentText());
-    result = parseTmdbSearchResponse(json);
+    result = parseTmdbSearchResponse(json, movie.year);
   } catch (err) {
     // TMDB unreachable / rate-limited / non-JSON response for this row only.
     // Don't cache anything — leave the cell blank so this row is retried on
@@ -240,7 +240,7 @@ function resolveTmdbMovieId_(props, movie) {
   var searchUrl = buildTmdbSearchUrl(props.tmdbApiKey, movie.title, movie.year);
   var response = UrlFetchApp.fetch(searchUrl, { muteHttpExceptions: true });
   var json = JSON.parse(response.getContentText());
-  return extractTmdbMovieId(json);
+  return extractTmdbMovieId(json, movie.year);
 }
 
 /**

@@ -26,7 +26,7 @@ columns by matching the header row (case-insensitive, trimmed) rather than by fi
 | `Prequel` | string | Title of another row's `Movie`, or blank. Must match another row's title (trimmed, case-insensitive) when present. |
 | `Watched` | boolean | `TRUE`/`FALSE` (or truthy string variants Sheets may store). |
 | `Poster URL` | string | **Optional, app-managed.** Cache for the resolved poster image URL (see Posters below). If this column doesn't exist yet, the backend creates it on first write. Users may hand-edit a cell to override a wrong match. |
-| `Rating` | number (0.5 steps) | User-set star rating for a watched movie, 0.5–5.0 in half-star steps. Blank if not yet rated. See "Ratings" below. |
+| `Rating` (or `Ratings`) | number (0.5 steps) | User-set star rating for a watched movie, 0.5–5.0 in half-star steps. Blank if not yet rated. Both singular and plural header spellings are accepted (a real deployment used "Ratings"; a strict singular-only match silently dropped every read/write). See "Ratings" below. |
 | `Austin`, `Eugie`, `Josh`, `Jouissance`, `Lynda`, `Marvin`, `Mel`, `Michelle` | boolean | One column per group member (fixed roster). Truthy (same truthy-string rules as `Watched`) means that person has personally seen this movie; blank/falsy means they haven't. See "Attendance" below. |
 
 Any other columns (e.g. `Comments`) are ignored.
@@ -42,13 +42,21 @@ must go through the backend, not the frontend, because:
 
 Resolution flow (in the backend, per row, when building the `list`/`spin` response):
 1. If the row's `Poster URL` cell is already populated, use it as-is (no network call).
-2. Otherwise, call TMDB `GET /search/movie?query=<title>&year=<year>`, take the top result's
-   `poster_path`, build `https://image.tmdb.org/t/p/w500<poster_path>`, and **write that URL back
-   into the row's `Poster URL` cell** (creating the column if needed) so future requests are free
-   and instant. If TMDB has no match, leave the cell blank and return `posterUrl: null` — don't
-   retry every single request; a blank cell means "checked, no match" only if paired with a
-   sentinel (e.g. write the literal string `none` and treat that as "checked, skip"), otherwise
-   every list call would re-search unmatched titles. Use that sentinel approach.
+2. Otherwise, call TMDB `GET /search/movie?query=<title>&year=<year>`. TMDB's `year` param is not
+   a reliable exact filter on its own (titles with many entries across decades — remakes,
+   animated-vs-live-action versions, re-releases — can still return a same-named result from the
+   wrong year as a top hit). **Don't just take `results[0]`** — when the row has a known year,
+   scan `results` for the entry whose `release_date` year matches it exactly and prefer that one;
+   fall back to `results[0]` only when no result's year matches (or the row has no year at all).
+   Build the chosen result's poster URL as `https://image.tmdb.org/t/p/w500<poster_path>`, and
+   **write that URL back into the row's `Poster URL` cell** (creating the column if needed) so
+   future requests are free and instant. If TMDB has no match, leave the cell blank and return
+   `posterUrl: null` — don't retry every single request; a blank cell means "checked, no match"
+   only if paired with a sentinel (e.g. write the literal string `none` and treat that as "checked,
+   skip"), otherwise every list call would re-search unmatched titles. Use that sentinel approach.
+   The same year-aware selection applies to resolving the TMDB movie id for the streaming-platforms
+   lookup (see "Streaming platforms & memorable quotes") — it's the same underlying TMDB search,
+   so a wrong-year poster match and a wrong-year streaming-platforms match are the same bug.
 3. The frontend never talks to TMDB directly — it only ever renders whatever `posterUrl` the
    backend returns.
 4. If `posterUrl` is null, the frontend shows a plain fallback card: the same ticket-card frame

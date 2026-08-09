@@ -56,6 +56,11 @@ function resolveHeaderIndexes(headerRow) {
         indexes.posterUrl = i;
         break;
       case 'rating':
+      case 'ratings':
+        // Accept both spellings -- a real deployment used the plural
+        // "Ratings" header, which a singular-only match silently dropped
+        // (indexes.rating stayed -1, so every read/write against it failed
+        // closed with no visible error). See SPEC.md's Sheet-shape table.
         indexes.rating = i;
         break;
       default:
@@ -431,28 +436,70 @@ function buildTmdbSearchUrl(apiKey, title, year) {
 }
 
 /**
+ * Pick the right entry out of a TMDB /search/movie `results` array. TMDB's
+ * `year` query param (see buildTmdbSearchUrl) is only a hint, not a strict
+ * filter -- titles with many entries across decades (remakes, animated vs.
+ * live-action versions, re-releases -- "Cinderella" has a 1950 animated
+ * version, a 1997 TV movie, a 2015 live-action version, a 2021 musical,
+ * plus foreign versions) can still return a same-named result from the
+ * wrong year as `results[0]`. This is shared by both posters
+ * (parseTmdbSearchResponse) and the streaming-platforms TMDB-id lookup
+ * (extractTmdbMovieId) -- they're the same underlying search, so a
+ * wrong-year poster match and a wrong-year streaming-platforms match are
+ * the same bug (SPEC.md's "Posters" section).
+ *
+ * `targetYear` null/undefined (row has no parseable year) -> today's
+ * existing behavior, `results[0]`. Otherwise scan for a `release_date`
+ * (format "YYYY-MM-DD", sometimes blank) whose year matches exactly, and
+ * use the first such match. No result matches the target year -> fall back
+ * to `results[0]` rather than reporting "no match" -- a wrong-year guess is
+ * still more useful than an honest-empty-state poster for what's plainly a
+ * real, found movie; only a completely empty `results` array means "no
+ * match" (see parseTmdbSearchResponse/extractTmdbMovieId below).
+ */
+function selectTmdbResultByYear(results, targetYear) {
+  if (!Array.isArray(results) || results.length === 0) return null;
+  if (targetYear === null || targetYear === undefined) return results[0];
+
+  var targetYearStr = String(targetYear);
+  for (var i = 0; i < results.length; i++) {
+    var releaseDate = results[i] && results[i].release_date;
+    if (typeof releaseDate === 'string' && releaseDate.indexOf(targetYearStr) === 0) {
+      return results[i];
+    }
+  }
+  return results[0];
+}
+
+/**
  * Parse a TMDB /search/movie JSON response into a poster resolution result.
  * `cacheValue` is what should be written back into the sheet's Poster URL
  * cell: either the resolved URL, or the `none` sentinel when there's no
- * match (so future requests skip re-searching).
+ * match (so future requests skip re-searching). `targetYear` is the sheet
+ * row's Year cell, used to disambiguate among multiple TMDB hits -- see
+ * selectTmdbResultByYear above.
  */
-function parseTmdbSearchResponse(tmdbJson) {
+function parseTmdbSearchResponse(tmdbJson, targetYear) {
   if (!tmdbJson || !Array.isArray(tmdbJson.results) || tmdbJson.results.length === 0) {
     return { posterUrl: null, cacheValue: POSTER_NONE_SENTINEL };
   }
-  var top = tmdbJson.results[0];
-  var posterUrl = buildTmdbImageUrl(top && top.poster_path);
+  var chosen = selectTmdbResultByYear(tmdbJson.results, targetYear);
+  var posterUrl = buildTmdbImageUrl(chosen && chosen.poster_path);
   if (!posterUrl) {
     return { posterUrl: null, cacheValue: POSTER_NONE_SENTINEL };
   }
   return { posterUrl: posterUrl, cacheValue: posterUrl };
 }
 
-/** Pull the top TMDB search result's movie id out of a /search/movie response, or null. */
-function extractTmdbMovieId(tmdbJson) {
+/**
+ * Pull the year-matched TMDB search result's movie id out of a
+ * /search/movie response, or null. `targetYear` is the sheet row's Year
+ * cell -- see selectTmdbResultByYear above for the disambiguation rule.
+ */
+function extractTmdbMovieId(tmdbJson, targetYear) {
   if (!tmdbJson || !Array.isArray(tmdbJson.results) || tmdbJson.results.length === 0) return null;
-  var top = tmdbJson.results[0];
-  return (top && typeof top.id === 'number') ? top.id : null;
+  var chosen = selectTmdbResultByYear(tmdbJson.results, targetYear);
+  return (chosen && typeof chosen.id === 'number') ? chosen.id : null;
 }
 
 // ---------------------------------------------------------------------------

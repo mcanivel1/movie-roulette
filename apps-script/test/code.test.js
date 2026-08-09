@@ -114,6 +114,32 @@ test('doGet list: a second call does not re-hit TMDB for rows already resolved',
   assert.equal(fetchMock.calls.length, 2); // unchanged — everything cached now, including "none"
 });
 
+test('doGet list: a title with multiple TMDB entries across years (e.g. "Cinderella") resolves the poster matching the sheet row\'s Year, not TMDB\'s top/most-popular hit', () => {
+  // Real product-owner-reported bug: TMDB's most popular "Cinderella" hit is
+  // the 2015 live-action version, but a sheet row for the 1950 animated
+  // classic (Year=1950) was getting the 2015 poster because the old code
+  // always took results[0] regardless of year.
+  const values = [
+    HEADER,
+    [false, 'Cinderella', 1950, '', 'n/a', '']
+  ];
+  const cinderellaResponder = () => ({
+    results: [
+      { id: 11224, poster_path: '/2015-poster.jpg', release_date: '2015-03-13' }, // most popular -> results[0]
+      { id: 12345, poster_path: '/1950-poster.jpg', release_date: '1950-02-15' }, // the actual sheet row's year
+      { id: 67890, poster_path: '/2021-poster.jpg', release_date: '2021-09-03' }
+    ]
+  });
+  const { context, sheet } = setUp(values, undefined, cinderellaResponder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list' } });
+  const body = res.json();
+  assert.equal(body.movies[0].posterUrl, 'https://image.tmdb.org/t/p/w500/1950-poster.jpg');
+
+  // And that's what gets cached back into the sheet, not the 2015 one.
+  const posterColIdx = HEADER.indexOf('Poster URL');
+  assert.equal(sheet._snapshot()[1][posterColIdx], 'https://image.tmdb.org/t/p/w500/1950-poster.jpg');
+});
+
 test('doGet: unauthorized token returns {error: "unauthorized"} without touching the sheet', () => {
   const { context, fetchMock } = setUp();
   const res = context.doGet({ parameter: { token: 'wrong-token', action: 'list' } });
@@ -372,6 +398,28 @@ test('doPost setRating: missing Rating column returns sheet_error', () => {
   assert.deepEqual(res.json(), { error: 'sheet_error' });
 });
 
+test('doPost setRating: a real deployment using the plural "Ratings" header round-trips a write and a subsequent list read', () => {
+  // Regression test for a real product-owner-reported bug: their sheet's
+  // header cell was "Ratings" (plural), which a singular-only header match
+  // silently failed to resolve -- ratings read back null forever and
+  // (before this fix landed) presumably never wrote either.
+  const values = [
+    ['Movie', 'Watched', 'Ratings', 'Poster URL'],
+    ['Part I', false, '', 'none']
+  ];
+  const { context, sheet } = setUp(values);
+
+  const written = context.doPost({
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setRating', id: 2, rating: 4 }) }
+  }).json();
+  assert.equal(written.error, undefined, 'setRating must succeed against a "Ratings" header, not fall through to sheet_error');
+  assert.equal(written.movie.rating, 4);
+  assert.equal(sheet._snapshot()[1][2], 4); // written into the "Ratings" column, not lost
+
+  const list = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list' } }).json();
+  assert.equal(list.movies[0].rating, 4, 'a rating stored under "Ratings" must also be readable back via list');
+});
+
 // ---------------------------------------------------------------------------
 // Attendance — GET action=list[&absent=...]
 // ---------------------------------------------------------------------------
@@ -550,6 +598,38 @@ test('doGet details: TMDB/Gemini failure for this movie degrades to empty arrays
   assert.equal(body.error, undefined);
   assert.deepEqual(body.streamingPlatforms, []);
   assert.deepEqual(body.quotes, []);
+});
+
+test('doGet details: a title with multiple TMDB entries across years resolves streaming platforms for the year-matched movie id, not TMDB\'s top hit', () => {
+  // Same underlying bug as the poster case (SPEC.md's Posters section
+  // explicitly calls this out) -- extractTmdbMovieId must also prefer the
+  // sheet row's Year over TMDB's top/most-popular search hit.
+  const values = [HEADER_V2, [false, 'Cinderella', 1950, '', 'n/a', '', '', true, true, true, true, true, true, true, true]];
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) {
+      // Only the 1950-matched id (12345) has providers configured here --
+      // if the code used results[0] (11224, the 2015 version) instead, this
+      // branch wouldn't match and streamingPlatforms would come back empty.
+      if (url.includes('/movie/12345/')) return { results: { US: { flatrate: [{ provider_name: 'Disney+' }] } } };
+      return { results: {} };
+    }
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify([]) }] } }] };
+    }
+    // TMDB title search -> multiple entries across years, same shape as the
+    // list/poster test above.
+    return {
+      results: [
+        { id: 11224, poster_path: '/2015-poster.jpg', release_date: '2015-03-13' },
+        { id: 12345, poster_path: '/1950-poster.jpg', release_date: '1950-02-15' },
+        { id: 67890, poster_path: '/2021-poster.jpg', release_date: '2021-09-03' }
+      ]
+    };
+  };
+  const { context } = setUp(values, undefined, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '2' } });
+  const body = res.json();
+  assert.deepEqual(body.streamingPlatforms, ['Disney+']);
 });
 
 test('doGet details: a non-200 Gemini response (e.g. invalid API key) degrades to empty quotes and is not cached', () => {

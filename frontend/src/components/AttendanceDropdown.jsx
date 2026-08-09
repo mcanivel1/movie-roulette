@@ -91,8 +91,8 @@ export default function AttendanceDropdown({ movies, absentees, onToggleMember, 
           <p className="attn-eligible-note">
             {attendanceApplied === false ? (
               <>
-                <b>{eligibleCount}</b> of <b>{movies.length}</b> films eligible tonight — that&rsquo;d leave nobody
-                anything to watch, so attendance isn&rsquo;t narrowing the pool right now
+                <b>{eligibleCount}</b> of <b>{movies.length}</b> films eligible tonight — narrowing by attendance
+                would leave nothing to watch, so we&rsquo;re showing everyone&rsquo;s eligible films instead
               </>
             ) : (
               <>
