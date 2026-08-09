@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { spin as spinApi, setWatched as setWatchedApi, ApiError } from '../api';
+import { spin as spinApi, setWatched as setWatchedApi, listMovies, ApiError } from '../api';
 import PosterImage from './PosterImage';
+import StarRating from './StarRating';
+import ExtrasStrip from './ExtrasStrip';
 
 const CHIP_COLORS = ['#ff5a47', '#2f5de3', '#ffc839', '#2fae6e'];
 const CHIP_SHAPES = ['circle', 'square', 'tri'];
@@ -18,7 +20,7 @@ const CHIP_SHAPES = ['circle', 'square', 'tri'];
  * (stage-spin gets [hidden], reveal renders in the same .stage) rather than
  * stacking below it. "Spin Again" re-runs the same doSpin() flow.
  */
-export default function RouletteView({ movies, onRefreshMovies, active }) {
+export default function RouletteView({ movies, onRefreshMovies, active, absentees, onSetRating }) {
   const [deckMovie, setDeckMovie] = useState(null); // null => idle stub text
   const [spinning, setSpinning] = useState(false);
   const [showReveal, setShowReveal] = useState(false);
@@ -26,12 +28,54 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
   const [markStatus, setMarkStatus] = useState('idle'); // idle | marking | marked
   const [spinError, setSpinError] = useState(null);
 
+  // Attendance-adjusted pool (SPEC.md's "Attendance" section): when nobody's
+  // marked absent this is left null and `movies` (the plain, unadjusted
+  // list already fetched by App.jsx) is used directly -- no extra request
+  // in the common/default case. Only when `absentees` is non-empty does
+  // Roulette fetch its own list(absentees) so the pool count and
+  // decoy-shuffle candidates built below stay consistent with what spin can
+  // actually pick (same rule, same fallback), without changing what Library
+  // shows for the same movies elsewhere.
+  const [attnMovies, setAttnMovies] = useState(null);
+  const [attendanceApplied, setAttendanceApplied] = useState(null);
+  const [attnLoading, setAttnLoading] = useState(false);
+
   const deckElRef = useRef(null);
   const deckFrontRef = useRef(null);
   const burstLayerRef = useRef(null);
   const timeouts = useRef([]);
 
   useEffect(() => () => { timeouts.current.forEach(clearTimeout); }, []);
+
+  useEffect(() => {
+    if (!absentees || absentees.length === 0) {
+      setAttnMovies(null);
+      setAttendanceApplied(null);
+      return undefined;
+    }
+    let cancelled = false;
+    setAttnLoading(true);
+    listMovies(absentees)
+      .then(({ movies: list, attendanceApplied: applied }) => {
+        if (cancelled) return;
+        setAttnMovies(list);
+        setAttendanceApplied(applied ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAttnMovies(null);
+          setAttendanceApplied(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAttnLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [absentees, movies]);
+
+  const poolMovies = attnMovies ?? movies;
 
   // Warm the browser's image cache for every possible decoy well before any
   // spin happens. Without this, a decoy tick can land on a poster that
@@ -42,11 +86,11 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
   // speeding up. Preloading means PosterImage's cache check almost always
   // resolves synchronously, so every tick gets its full, even hold time.
   useEffect(() => {
-    movies.filter((m) => m.eligible && m.posterUrl).forEach((m) => {
+    poolMovies.filter((m) => m.eligible && m.posterUrl).forEach((m) => {
       const img = new Image();
       img.src = m.posterUrl;
     });
-  }, [movies]);
+  }, [poolMovies]);
 
   function scheduleTimeout(fn, ms) {
     const id = setTimeout(fn, ms);
@@ -54,7 +98,7 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
     return id;
   }
 
-  const eligibleMovies = movies.filter((m) => m.eligible);
+  const eligibleMovies = poolMovies.filter((m) => m.eligible);
   const poolCount = eligibleMovies.length;
 
   function spawnBurst() {
@@ -118,7 +162,7 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
     // full sheet re-read, sometimes a live TMDB lookup) gets absorbed into
     // motion you're already watching rather than being a dead pause before
     // anything moves.
-    const spinPromise = spinApi();
+    const spinPromise = spinApi(absentees);
 
     // Indefinite decoy shuffle: no fixed length, since we don't yet know
     // how long the request will take. Runs at a constant brisk tempo (the
@@ -139,6 +183,7 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
     try {
       const res = await spinPromise;
       selected = res.movie;
+      if (res.attendanceApplied !== undefined) setAttendanceApplied(res.attendanceApplied);
     } catch (err) {
       setSpinError(err instanceof ApiError ? err.code : 'spin_failed');
     }
@@ -227,54 +272,81 @@ export default function RouletteView({ movies, onRefreshMovies, active }) {
                 </>}
           </p>
 
+          {attendanceApplied === false && (
+            <p className="pool-status">
+              Couldn&rsquo;t narrow by attendance without emptying the pool — showing everyone&rsquo;s films instead.
+            </p>
+          )}
+
           {spinError && (
             <p className="pool-status empty">Couldn&rsquo;t spin — please try again.</p>
           )}
 
           <button
             className="spin-btn"
-            disabled={spinning || poolCount === 0}
+            disabled={spinning || poolCount === 0 || attnLoading}
             onClick={doSpin}
           >
             Spin the Roulette
           </button>
         </div>
 
-        {showReveal && revealMovie && (
-          <div className="reveal enter">
-            <div className="poster ticket">
-              <div className="stub-head">
-                <span>{revealMovie.year}</span>
-                <span className="stub-dot" />
+        {showReveal && revealMovie && (() => {
+          // Title/year/poster/prequel stay pinned to the movie the spin
+          // actually picked (revealMovie), but watched/rating are mutable
+          // fields App.jsx's `movies` keeps live (optimistic rating patches,
+          // refresh() after marking watched) -- so once that same id shows
+          // up there again, prefer its copy for those two fields instead of
+          // the frozen spin-time snapshot.
+          const live = movies.find((m) => m.id === revealMovie.id) ?? revealMovie;
+          const isWatched = markStatus === 'marked' || live.watched;
+          return (
+            <div className="reveal enter">
+              <div className="poster ticket">
+                <div className="stub-head">
+                  <span>{revealMovie.year}</span>
+                  <span className="stub-dot" />
+                </div>
+                <PosterImage movie={revealMovie} />
+                <div className="stub-foot">
+                  <span className="poster-title">{revealMovie.title}</span>
+                </div>
               </div>
-              <PosterImage movie={revealMovie} />
-              <div className="stub-foot">
-                <span className="poster-title">{revealMovie.title}</span>
+              <div className="reveal-info">
+                <p className="reveal-eyebrow">
+                  {revealMovie.prequel ? `Sequel to ${revealMovie.prequel}` : 'Standalone feature'}
+                </p>
+                <div className="reveal-title-row">
+                  <h2 className="reveal-title">{revealMovie.title}</h2>
+                  <span className="reveal-year">{revealMovie.year}</span>
+                </div>
+                {isWatched && (
+                  <StarRating
+                    rating={live.rating}
+                    onRate={(value) => onSetRating(revealMovie.id, value)}
+                    size="lg"
+                    label={`Rate ${revealMovie.title}`}
+                  />
+                )}
+                <div className="reveal-actions">
+                  <button
+                    className="btn-primary"
+                    disabled={markStatus !== 'idle' || live.watched}
+                    onClick={handleMarkWatched}
+                  >
+                    {markStatus === 'marked' || live.watched
+                      ? 'Marked as Watched'
+                      : markStatus === 'marking'
+                      ? 'Marking…'
+                      : 'Mark as Watched'}
+                  </button>
+                  <button className="btn-ghost" onClick={doSpin}>Spin Again</button>
+                </div>
+                <ExtrasStrip movieId={revealMovie.id} />
               </div>
             </div>
-            <div className="reveal-info">
-              <p className="reveal-eyebrow">
-                {revealMovie.prequel ? `Sequel to ${revealMovie.prequel}` : 'Standalone feature'}
-              </p>
-              <h2 className="reveal-title">{revealMovie.title}</h2>
-              <p className="reveal-year">{revealMovie.year}</p>
-              <div className="reveal-actions">
-                <button
-                  className="btn-primary"
-                  disabled={markStatus !== 'idle'}
-                  onClick={handleMarkWatched}
-                >
-                  {markStatus === 'marked'
-                    ? 'Marked as Watched'
-                    : markStatus === 'marking'
-                    ? 'Marking…'
-                    : 'Mark as Watched'}
-                </button>
-                <button className="btn-ghost" onClick={doSpin}>Spin Again</button>
-              </div>
-            </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
     </section>
   );

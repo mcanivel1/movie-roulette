@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import PosterImage from './PosterImage';
+import StarRating from './StarRating';
 
 const FILTERS = [
   { key: 'all', label: 'All' },
@@ -13,7 +14,7 @@ function statusFor(movie) {
   return { key: 'locked', label: movie.waitingOn ? `Waiting on ${movie.waitingOn}` : 'Waiting' };
 }
 
-export default function LibraryView({ movies, onToggleWatched, active, pendingId }) {
+export default function LibraryView({ movies, onToggleWatched, onSetRating, active, pendingId }) {
   const [filter, setFilter] = useState('all');
 
   const watchedCount = movies.filter((m) => m.watched).length;
@@ -56,8 +57,18 @@ export default function LibraryView({ movies, onToggleWatched, active, pendingId
                   <span className={`card-status ${st.key}`}>{st.key === 'locked' ? 'Waiting' : st.label}</span>
                 </div>
                 <div className="card-body">
-                  <div className="card-title">{movie.title}</div>
-                  <div className="card-meta">{movie.year}</div>
+                  <div className="card-title-row">
+                    <span className="card-title">{movie.title}</span>
+                    <span className="card-meta">{movie.year}</span>
+                  </div>
+                  {movie.watched && (
+                    <StarRating
+                      rating={movie.rating}
+                      onRate={(value) => onSetRating(movie.id, value)}
+                      size="sm"
+                      label={`Rate ${movie.title}`}
+                    />
+                  )}
                   <div className="card-chain">
                     {st.key === 'locked' && movie.waitingOn ? (
                       <>Waiting on <b>{movie.waitingOn}</b></>

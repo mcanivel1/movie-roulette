@@ -11,6 +11,22 @@
 
 var POSTER_URL_HEADER = 'Poster URL';
 
+// Streaming-platform and quote lookups are lazy/secondary (SPEC.md's
+// "details" endpoint) and cached via CacheService rather than the sheet --
+// a multi-hour TTL is fine per spec since neither TMDB providers nor an
+// LLM's answer for a given movie changes on any meaningful timescale.
+// CacheService's own max TTL is 6 hours (21600s); this sits right at it.
+var DETAILS_CACHE_TTL_SECONDS = 6 * 60 * 60;
+
+// Gemini Flash: fast, cheap-to-free, and its free tier needs no billing
+// account (SPEC.md's whole reason for choosing it over the Anthropic API).
+// Model names on Google's side move around -- if this one gets retired,
+// swap it here and in README.md's Script Properties/setup docs, nowhere
+// else references it.
+var GEMINI_MODEL = 'gemini-2.0-flash-lite';
+var GEMINI_GENERATE_CONTENT_URL = 'https://generativelanguage.googleapis.com/v1beta/models/' +
+  GEMINI_MODEL + ':generateContent';
+
 // ---------------------------------------------------------------------------
 // Config / sheet access
 // ---------------------------------------------------------------------------
@@ -20,7 +36,8 @@ function getScriptProperties_() {
   return {
     spreadsheetId: props.getProperty('SPREADSHEET_ID'),
     sharedToken: props.getProperty('SHARED_TOKEN'),
-    tmdbApiKey: props.getProperty('TMDB_API_KEY')
+    tmdbApiKey: props.getProperty('TMDB_API_KEY'),
+    geminiApiKey: props.getProperty('GEMINI_API_KEY')
   };
 }
 
@@ -99,20 +116,43 @@ function resolvePosterForMovie_(sheet, props, movie) {
 // Actions
 // ---------------------------------------------------------------------------
 
-function listMovies_(sheet, props) {
+/**
+ * `absentNames` is the already-parsed (parseAbsentParam) roster subset for
+ * this request -- empty when `absent` was omitted/blank/all-unrecognized,
+ * in which case attendance is a no-op and `attendanceApplied` is left
+ * `undefined` so JSON.stringify drops the key entirely (SPEC.md: the field
+ * is only present when `absent` was sent non-empty).
+ */
+function listMovies_(sheet, props, absentNames) {
   var movies = readMovies_(sheet);
-  return movies.map(function (m) {
+  var attendanceApplied;
+  if (absentNames && absentNames.length > 0) {
+    var attendanceResult = computeAttendanceEligibility(movies, absentNames);
+    movies = attendanceResult.movies;
+    attendanceApplied = attendanceResult.attendanceApplied;
+  }
+  var publicMovies = movies.map(function (m) {
     var posterUrl = resolvePosterForMovie_(sheet, props, m);
-    return toPublicMovie(m, posterUrl);
+    return toPublicMovie(m, posterUrl, { includeSeenBy: true });
   });
+  return { movies: publicMovies, attendanceApplied: attendanceApplied };
 }
 
-function spinMovie_(sheet, props) {
+function spinMovie_(sheet, props, absentNames) {
   var movies = readMovies_(sheet);
+  var attendanceApplied;
+  if (absentNames && absentNames.length > 0) {
+    var attendanceResult = computeAttendanceEligibility(movies, absentNames);
+    movies = attendanceResult.movies;
+    attendanceApplied = attendanceResult.attendanceApplied;
+  }
   var picked = pickRandomEligible(movies);
-  if (!picked) return null;
-  var posterUrl = resolvePosterForMovie_(sheet, props, picked);
-  return toPublicMovie(picked, posterUrl);
+  var movie = null;
+  if (picked) {
+    var posterUrl = resolvePosterForMovie_(sheet, props, picked);
+    movie = toPublicMovie(picked, posterUrl);
+  }
+  return { movie: movie, attendanceApplied: attendanceApplied };
 }
 
 /**
@@ -158,6 +198,179 @@ function setWatchedAction_(sheet, props, id, watchedValue) {
   return { movie: toPublicMovie(updated, posterUrl) };
 }
 
+/**
+ * Write the Rating cell. Unlike Watched, there's no Sheets-data-validation
+ * fallback to worry about here -- Rating is a plain number column (or
+ * blank to clear), not a checkbox/dropdown, so a single setValue() covers
+ * it. `ratingValue` has already been validated (isValidRating) by the
+ * caller before this runs.
+ */
+function setRatingAction_(sheet, props, id, ratingValue) {
+  var movies = readMovies_(sheet);
+  var target = findMovieById(movies, id);
+  if (!target) return { error: 'not_found' };
+
+  var headerIndexes = resolveHeaderIndexes(readHeaderRow_(sheet));
+  if (headerIndexes.rating < 0) return { error: 'sheet_error' };
+
+  var cellValue = (ratingValue === null) ? '' : ratingValue;
+  sheet.getRange(id, headerIndexes.rating + 1).setValue(cellValue);
+  SpreadsheetApp.flush();
+
+  // Re-read after write, same as setWatchedAction_ -- keeps this response
+  // consistent with whatever's actually persisted.
+  var updatedMovies = readMovies_(sheet);
+  var updated = findMovieById(updatedMovies, id);
+  var posterUrl = resolvePosterForMovie_(sheet, props, updated);
+  return { movie: toPublicMovie(updated, posterUrl) };
+}
+
+/** Cache key for a movie's streaming-platforms/quotes lookup, scoped by kind. */
+function detailsCacheKey_(kind, movie) {
+  return kind + ':' + normalizeTitle(movie.title) + (movie.year ? (':' + movie.year) : '');
+}
+
+/**
+ * Resolve TMDB's movie id for a title/year, reusing the same
+ * search-by-title(+year) lookup posters already do (SPEC.md). Throws on a
+ * TMDB failure or malformed response -- callers are expected to wrap this
+ * in their own try/catch, same isolation pattern as resolvePosterForMovie_.
+ */
+function resolveTmdbMovieId_(props, movie) {
+  var searchUrl = buildTmdbSearchUrl(props.tmdbApiKey, movie.title, movie.year);
+  var response = UrlFetchApp.fetch(searchUrl, { muteHttpExceptions: true });
+  var json = JSON.parse(response.getContentText());
+  return extractTmdbMovieId(json);
+}
+
+/**
+ * Resolve (and cache) the streaming platforms for one movie. Cached via
+ * CacheService, not the sheet (SPEC.md -- nothing in the sheet schema is
+ * reserved for this).
+ *
+ * The cache.put() lives INSIDE the try block, after every fetch/parse step
+ * has already succeeded -- mirroring resolvePosterForMovie_'s own fix for
+ * the identical failure mode. A genuine "checked, TMDB has no match" result
+ * (tmdbId null, or a match with no US flatrate listing) is a real answer
+ * and gets cached like any other. But if UrlFetchApp/JSON.parse throws
+ * partway through (TMDB down, rate-limited, non-JSON response), execution
+ * never reaches the cache.put() line, so nothing is written -- the next
+ * request retries TMDB for this movie instead of being stuck serving an
+ * incorrectly-cached empty list for the full TTL.
+ */
+function resolveStreamingPlatforms_(props, movie) {
+  var cache = CacheService.getScriptCache();
+  var key = detailsCacheKey_('providers', movie);
+  var cached = cache.get(key);
+  if (cached !== null) {
+    try {
+      return JSON.parse(cached);
+    } catch (err) {
+      // Corrupt cache entry -- fall through and recompute.
+    }
+  }
+
+  try {
+    var platforms = [];
+    var tmdbId = resolveTmdbMovieId_(props, movie);
+    if (tmdbId) {
+      var url = buildTmdbProvidersUrl(props.tmdbApiKey, tmdbId);
+      var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+      var json = JSON.parse(response.getContentText());
+      platforms = parseTmdbProvidersResponse(json);
+    }
+    cache.put(key, JSON.stringify(platforms), DETAILS_CACHE_TTL_SECONDS);
+    return platforms;
+  } catch (err) {
+    // TMDB unreachable / rate-limited / non-JSON response -- degrade to
+    // empty for THIS request only. Deliberately not cached (see doc comment
+    // above), so a transient failure gets retried next time.
+    return [];
+  }
+}
+
+/**
+ * Resolve (and cache) memorable quotes for one movie via the Google Gemini
+ * API's `generateContent` endpoint (chosen over the Anthropic API so this
+ * app can run on Gemini's free tier -- see SPEC.md). Cached via
+ * CacheService keyed by title (SPEC.md) -- an LLM call is slower and
+ * costlier than a cache hit, and quotes for a given movie don't change.
+ *
+ * Three distinct failure shapes all degrade to an empty list for THIS
+ * request only, without writing to the cache, so the next request retries
+ * rather than getting stuck on a permanently-cached false "no quotes":
+ *  - a thrown fetch/JSON.parse exception (network down, non-JSON body),
+ *  - a non-200 HTTP response (bad/missing API key, rate limit, ...) --
+ *    `muteHttpExceptions: true` means this arrives as a normal response,
+ *    not a thrown exception, so it needs its own check,
+ *  - a "blocked" response per isGeminiBlocked (no candidates, or a
+ *    finishReason other than "STOP", e.g. a safety block).
+ * Only past all three does cache.put() run, mirroring
+ * resolveStreamingPlatforms_'s fail-open-for-retry shape above -- and the
+ * same fix QA caught when this cached unconditionally on the old
+ * Anthropic-backed path.
+ */
+function resolveQuotes_(props, movie) {
+  var cache = CacheService.getScriptCache();
+  var key = detailsCacheKey_('quotes', movie);
+  var cached = cache.get(key);
+  if (cached !== null) {
+    try {
+      return JSON.parse(cached);
+    } catch (err) {
+      // Corrupt cache entry -- fall through and recompute.
+    }
+  }
+
+  try {
+    var payload = buildGeminiQuotesPayload(movie.title, movie.year);
+    var response = UrlFetchApp.fetch(GEMINI_GENERATE_CONTENT_URL, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'x-goog-api-key': props.geminiApiKey
+      },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    if (response.getResponseCode() !== 200) {
+      return [];
+    }
+    var json = JSON.parse(response.getContentText());
+    if (isGeminiBlocked(json)) {
+      return [];
+    }
+    var quotes = parseGeminiQuotesResponse(json);
+    cache.put(key, JSON.stringify(quotes), DETAILS_CACHE_TTL_SECONDS);
+    return quotes;
+  } catch (err) {
+    // Gemini unreachable / non-JSON response -- degrade to empty for THIS
+    // request only. Deliberately not cached (see doc comment above), so a
+    // transient failure gets retried next time.
+    return [];
+  }
+}
+
+/**
+ * GET action=details&id=X — lazy/secondary call, not bundled into
+ * list/spin (SPEC.md). `idParam` arrives as a raw query-string value
+ * (always a string on GET); anything that doesn't resolve to a real row
+ * id is `not_found`, same error SPEC.md specifies for an `id` mismatch.
+ */
+function detailsAction_(sheet, idParam, props) {
+  var id = Number(idParam);
+  if (idParam === undefined || idParam === '' || isNaN(id)) return { error: 'not_found' };
+
+  var movies = readMovies_(sheet);
+  var movie = findMovieById(movies, id);
+  if (!movie) return { error: 'not_found' };
+
+  return {
+    streamingPlatforms: resolveStreamingPlatforms_(props, movie),
+    quotes: resolveQuotes_(props, movie)
+  };
+}
+
 // ---------------------------------------------------------------------------
 // HTTP entry points
 // ---------------------------------------------------------------------------
@@ -177,12 +390,16 @@ function doGet(e) {
     }
 
     var sheet = getSheet_(props);
+    var absentNames = parseAbsentParam(params.absent);
 
     if (params.action === 'list') {
-      return jsonResponse_({ movies: listMovies_(sheet, props) });
+      return jsonResponse_(listMovies_(sheet, props, absentNames));
     }
     if (params.action === 'spin') {
-      return jsonResponse_({ movie: spinMovie_(sheet, props) });
+      return jsonResponse_(spinMovie_(sheet, props, absentNames));
+    }
+    if (params.action === 'details') {
+      return jsonResponse_(detailsAction_(sheet, params.id, props));
     }
     return jsonResponse_({ error: 'bad_request' });
   } catch (err) {
@@ -210,16 +427,29 @@ function doPost(e) {
       return jsonResponse_({ error: 'unauthorized' });
     }
 
-    if (body.action !== 'setWatched') {
-      return jsonResponse_({ error: 'bad_request' });
-    }
-    if (typeof body.id !== 'number' || typeof body.watched !== 'boolean') {
-      return jsonResponse_({ error: 'bad_request' });
+    var sheet = getSheet_(props);
+
+    if (body.action === 'setWatched') {
+      if (typeof body.id !== 'number' || typeof body.watched !== 'boolean') {
+        return jsonResponse_({ error: 'bad_request' });
+      }
+      return jsonResponse_(setWatchedAction_(sheet, props, body.id, body.watched));
     }
 
-    var sheet = getSheet_(props);
-    var result = setWatchedAction_(sheet, props, body.id, body.watched);
-    return jsonResponse_(result);
+    if (body.action === 'setRating') {
+      if (typeof body.id !== 'number') {
+        return jsonResponse_({ error: 'bad_request' });
+      }
+      // isValidRating rejects anything that isn't null or a valid
+      // half-step number in [0.5, 5] -- including a missing/undefined
+      // `rating` field, since a write must say explicitly what it wants.
+      if (!isValidRating(body.rating)) {
+        return jsonResponse_({ error: 'bad_request' });
+      }
+      return jsonResponse_(setRatingAction_(sheet, props, body.id, body.rating));
+    }
+
+    return jsonResponse_({ error: 'bad_request' });
   } catch (err) {
     return jsonResponse_({ error: 'sheet_error' });
   }

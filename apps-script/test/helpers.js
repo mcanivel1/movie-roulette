@@ -136,10 +136,33 @@ function createMockSpreadsheetApp(sheet) {
   };
 }
 
+// Marker used by mockHttpResponse() below to distinguish "a deliberate
+// non-200 response" from a plain JSON body (which always means 200) --
+// see createMockUrlFetchApp's doc comment.
+const MOCK_HTTP_RESPONSE_MARKER = Symbol('mockHttpResponse');
+
 /**
- * `responseForUrl` is a function(url) => parsed JSON object to hand back
- * from UrlFetchApp.fetch. Every call is recorded in `.calls` for assertions
- * about whether/how many times TMDB was hit.
+ * Wrap a JSON body with a specific HTTP status code for a responder to
+ * return from createMockUrlFetchApp -- e.g. `mockHttpResponse(403, {error:
+ * {message: 'API key not valid'}})` to simulate Gemini rejecting a bad key.
+ * Code.js's mocked UrlFetchApp always sets `muteHttpExceptions: true`, so a
+ * non-200 status arrives as a normal response object (not a thrown
+ * exception) -- callers that check `response.getResponseCode()` need a way
+ * to simulate that.
+ */
+function mockHttpResponse(responseCode, json) {
+  return { [MOCK_HTTP_RESPONSE_MARKER]: true, responseCode, json };
+}
+
+/**
+ * `responseForUrl` is a function(url, options) => parsed JSON object to
+ * hand back from UrlFetchApp.fetch, implying a 200 response -- or the
+ * result of mockHttpResponse() above for a specific non-200 status.
+ * `options` is passed through so a responder can inspect a POST payload
+ * (e.g. a Gemini generateContent request body) when the URL alone doesn't
+ * disambiguate; responders that only care about the URL can ignore the
+ * second argument. Every call is recorded in `.calls` for assertions about
+ * whether/how many times an endpoint was hit.
  */
 function createMockUrlFetchApp(responseForUrl) {
   const calls = [];
@@ -147,8 +170,14 @@ function createMockUrlFetchApp(responseForUrl) {
     calls,
     fetch(url, options) {
       calls.push({ url, options });
-      const json = responseForUrl(url);
+      const result = responseForUrl(url, options);
+      const isCustomStatus = result && typeof result === 'object' && result[MOCK_HTTP_RESPONSE_MARKER];
+      const responseCode = isCustomStatus ? result.responseCode : 200;
+      const json = isCustomStatus ? result.json : result;
       return {
+        getResponseCode() {
+          return responseCode;
+        },
         getContentText() {
           return JSON.stringify(json);
         }
@@ -174,11 +203,47 @@ const mockContentService = {
   }
 };
 
+/**
+ * An in-memory stand-in for CacheService.getScriptCache() -- a plain
+ * key/value store with no real expiry (tests don't need TTL semantics,
+ * just to observe whether Code.js reads/writes the cache instead of
+ * re-hitting UrlFetchApp). `.get`/`.put` calls are recorded in `.calls`
+ * so tests can assert on cache hit/miss behavior without inspecting the
+ * store's internals directly.
+ */
+function createMockCacheService(initialValues) {
+  const store = Object.assign({}, initialValues || {});
+  const calls = [];
+  const cache = {
+    get(key) {
+      calls.push({ op: 'get', key });
+      return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+    },
+    put(key, value, _ttlSeconds) {
+      calls.push({ op: 'put', key, value });
+      store[key] = value;
+    },
+    remove(key) {
+      calls.push({ op: 'remove', key });
+      delete store[key];
+    }
+  };
+  return {
+    getScriptCache() {
+      return cache;
+    },
+    calls,
+    _store: store
+  };
+}
+
 module.exports = {
   loadGasContext,
   createMockSheet,
   createMockPropertiesService,
   createMockSpreadsheetApp,
   createMockUrlFetchApp,
+  mockHttpResponse,
+  createMockCacheService,
   mockContentService
 };

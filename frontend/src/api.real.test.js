@@ -54,8 +54,22 @@ describe('src/api.js — real backend wiring (fetch mocked, per SPEC.md)', () =>
     expect(url.origin + url.pathname).toBe(FAKE_URL);
     expect(url.searchParams.get('token')).toBe(FAKE_TOKEN);
     expect(url.searchParams.get('action')).toBe('list');
+    expect(url.searchParams.has('absent')).toBe(false);
     expect(calledInit).toBeUndefined();
-    expect(result).toEqual([{ id: 2, title: 'Harbor Lights' }]);
+    expect(result).toEqual({ movies: [{ id: 2, title: 'Harbor Lights' }], attendanceApplied: undefined });
+  });
+
+  it('listMovies(absentees) appends &absent=Name,Name and surfaces attendanceApplied', async () => {
+    fetchMock.mockResolvedValue({
+      json: async () => ({ movies: [{ id: 2, title: 'Harbor Lights' }], attendanceApplied: true }),
+    });
+
+    const { listMovies } = await loadRealApi();
+    const result = await listMovies(['Austin', ' josh ']);
+
+    const url = new URL(fetchMock.mock.calls[0][0]);
+    expect(url.searchParams.get('absent')).toBe('Austin,Josh');
+    expect(result).toEqual({ movies: [{ id: 2, title: 'Harbor Lights' }], attendanceApplied: true });
   });
 
   it('spin() sends a GET with action=spin and returns { movie } untouched', async () => {
@@ -76,6 +90,84 @@ describe('src/api.js — real backend wiring (fetch mocked, per SPEC.md)', () =>
 
     const { spin } = await loadRealApi();
     await expect(spin()).resolves.toEqual({ movie: null });
+  });
+
+  it('spin(absentees) appends &absent=Name,Name', async () => {
+    fetchMock.mockResolvedValue({
+      json: async () => ({ movie: { id: 4, title: 'Neon Meridian' }, attendanceApplied: false }),
+    });
+
+    const { spin } = await loadRealApi();
+    const result = await spin(['Mel']);
+
+    const url = new URL(fetchMock.mock.calls[0][0]);
+    expect(url.searchParams.get('absent')).toBe('Mel');
+    expect(result).toEqual({ movie: { id: 4, title: 'Neon Meridian' }, attendanceApplied: false });
+  });
+
+  it('getDetails() sends a GET with action=details and id, no init object', async () => {
+    fetchMock.mockResolvedValue({
+      json: async () => ({ streamingPlatforms: ['Netflix'], quotes: ['A quote.'] }),
+    });
+
+    const { getDetails } = await loadRealApi();
+    const result = await getDetails(5);
+
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+    const url = new URL(calledUrl);
+    expect(url.searchParams.get('action')).toBe('details');
+    expect(url.searchParams.get('id')).toBe('5');
+    expect(calledInit).toBeUndefined();
+    expect(result).toEqual({ streamingPlatforms: ['Netflix'], quotes: ['A quote.'] });
+  });
+
+  it('getDetails() surfaces { error: "not_found" } as a thrown ApiError', async () => {
+    fetchMock.mockResolvedValue({ json: async () => ({ error: 'not_found' }) });
+
+    const { getDetails, ApiError } = await loadRealApi();
+    await expect(getDetails(999)).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it('setRating() POSTs with no headers object and the exact SPEC.md body shape', async () => {
+    fetchMock.mockResolvedValue({
+      json: async () => ({ movie: { id: 5, rating: 4.5 } }),
+    });
+
+    const { setRating } = await loadRealApi();
+    await setRating(5, 4.5);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledInit] = fetchMock.mock.calls[0];
+
+    expect(calledUrl).toBe(FAKE_URL);
+    expect(calledInit.method).toBe('POST');
+    // Same CORS-safe convention as setWatched — no headers key at all.
+    expect(calledInit).not.toHaveProperty('headers');
+    expect(typeof calledInit.body).toBe('string');
+    expect(JSON.parse(calledInit.body)).toEqual({
+      token: FAKE_TOKEN,
+      action: 'setRating',
+      id: 5,
+      rating: 4.5,
+    });
+  });
+
+  it('setRating() also works for clearing a rating (rating: null)', async () => {
+    fetchMock.mockResolvedValue({ json: async () => ({ movie: { id: 5, rating: null } }) });
+
+    const { setRating } = await loadRealApi();
+    await setRating(5, null);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.rating).toBeNull();
+  });
+
+  it('setRating() surfaces { error: "bad_request" } as a thrown ApiError', async () => {
+    fetchMock.mockResolvedValue({ json: async () => ({ error: 'bad_request' }) });
+
+    const { setRating, ApiError } = await loadRealApi();
+    await expect(setRating(5, 3.25)).rejects.toBeInstanceOf(ApiError);
+    await expect(setRating(5, 3.25)).rejects.toMatchObject({ code: 'bad_request' });
   });
 
   it('setWatched() POSTs with no headers object and the exact SPEC.md body shape', async () => {

@@ -14,6 +14,12 @@
 
 var POSTER_NONE_SENTINEL = 'none';
 
+// Fixed 8-person group roster (SPEC.md "Attendance"). Column headers, the
+// `absent` param, and the `seenBy` response map all key off these exact
+// names -- matching is case-insensitive/trimmed at every boundary that reads
+// user/sheet input, but the canonical casing below is what's ever emitted.
+var ROSTER = ['Austin', 'Eugie', 'Josh', 'Jouissance', 'Lynda', 'Marvin', 'Mel', 'Michelle'];
+
 // ---------------------------------------------------------------------------
 // Header / row parsing
 // ---------------------------------------------------------------------------
@@ -21,10 +27,14 @@ var POSTER_NONE_SENTINEL = 'none';
 /**
  * Resolve the column index of each known header, case-insensitively and
  * independent of column order. Unknown/extra columns are ignored. Returns
- * -1 for any header that isn't present.
+ * -1 for any header that isn't present. `members` maps each roster name to
+ * its column index (also -1 if absent).
  */
 function resolveHeaderIndexes(headerRow) {
-  var indexes = { movie: -1, year: -1, prequel: -1, watched: -1, posterUrl: -1 };
+  var indexes = { movie: -1, year: -1, prequel: -1, watched: -1, posterUrl: -1, rating: -1, members: {} };
+  ROSTER.forEach(function (name) {
+    indexes.members[name] = -1;
+  });
   if (!headerRow) return indexes;
   for (var i = 0; i < headerRow.length; i++) {
     var raw = headerRow[i];
@@ -45,8 +55,17 @@ function resolveHeaderIndexes(headerRow) {
       case 'poster url':
         indexes.posterUrl = i;
         break;
+      case 'rating':
+        indexes.rating = i;
+        break;
       default:
-        break; // extra/unknown column, ignored
+        // Not one of the fixed single-purpose headers -- check whether it's
+        // one of the 8 per-member attendance columns before giving up on it.
+        var matchedMember = ROSTER.filter(function (name) {
+          return name.toLowerCase() === key;
+        })[0];
+        if (matchedMember) indexes.members[matchedMember] = i;
+        break; // otherwise: extra/unknown column, ignored
     }
   }
   return indexes;
@@ -97,6 +116,42 @@ function parseWatched(rawValue) {
 }
 
 /**
+ * Rating column holds a plain number (0.5-5 in half-steps) or is blank.
+ * Unlike Watched/attendance columns this isn't a truthy/falsy read -- an
+ * unparseable or out-of-range value just reads back as null (the same as
+ * blank) rather than being coerced or rejected here; validation of a
+ * *write* is a separate concern, see isValidRating below.
+ */
+function extractRatingCell(rawValue) {
+  if (rawValue === null || rawValue === undefined || rawValue === '') return null;
+  if (typeof rawValue === 'number') return rawValue;
+  if (typeof rawValue === 'string') {
+    var trimmed = rawValue.trim();
+    if (trimmed === '') return null;
+    var asNum = Number(trimmed);
+    if (!isNaN(asNum)) return asNum;
+  }
+  return null;
+}
+
+/**
+ * Build the `seenBy` map for one row: one truthy/falsy entry per roster
+ * member, using the same truthy-string parsing rules as Watched (per
+ * SPEC.md's Attendance section). A member whose column is missing from the
+ * sheet entirely reads as false (hasn't seen it), matching Watched's
+ * missing-column default.
+ */
+function buildSeenByFromRow(rowValues, headerIndexes) {
+  var seenBy = {};
+  ROSTER.forEach(function (name) {
+    var idx = headerIndexes.members[name];
+    var raw = idx >= 0 ? rowValues[idx] : false;
+    seenBy[name] = parseWatched(raw);
+  });
+  return seenBy;
+}
+
+/**
  * Build one internal movie record from a single sheet data row.
  * rowNumber is the row's absolute, 1-indexed position in the sheet
  * (including the header row) — this becomes the movie's stable `id`.
@@ -115,13 +170,17 @@ function buildMovieFromRow(rowValues, headerIndexes, rowNumber) {
   var posterUrlCellRaw = headerIndexes.posterUrl >= 0 ? rowValues[headerIndexes.posterUrl] : '';
   var posterUrlCell = (posterUrlCellRaw === null || posterUrlCellRaw === undefined) ? '' : String(posterUrlCellRaw).trim();
 
+  var ratingRaw = headerIndexes.rating >= 0 ? rowValues[headerIndexes.rating] : null;
+
   return {
     id: rowNumber,
     title: title,
     year: extractYear(yearRaw),
     prequel: prequel,
     watched: parseWatched(watchedRaw),
-    posterUrlCell: posterUrlCell
+    posterUrlCell: posterUrlCell,
+    rating: extractRatingCell(ratingRaw),
+    seenBy: buildSeenByFromRow(rowValues, headerIndexes)
   };
 }
 
@@ -198,6 +257,106 @@ function computeEligibility(movies) {
     out.waitingOn = waitingOn;
     return out;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Ratings
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate a setRating write: null (clears the rating) or a number in
+ * [0.5, 5] on an exact half-step. Anything else (wrong type, NaN,
+ * out-of-range, or off-grid like 3.3) is invalid.
+ */
+function isValidRating(rating) {
+  if (rating === null) return true;
+  if (typeof rating !== 'number' || isNaN(rating)) return false;
+  if (rating < 0.5 || rating > 5) return false;
+  var doubled = rating * 2;
+  return Math.abs(doubled - Math.round(doubled)) < 1e-9;
+}
+
+// ---------------------------------------------------------------------------
+// Attendance
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the `absent` query param (comma-separated member names) into a
+ * de-duplicated array of canonical roster names. Matching is
+ * case-insensitive/trimmed; any entry that doesn't match a roster member
+ * (typo, unknown name, stray comma) is silently dropped rather than
+ * erroring -- a request with an unrecognized name behaves the same as one
+ * that simply didn't name that person as absent.
+ */
+function parseAbsentParam(raw) {
+  if (raw === null || raw === undefined) return [];
+  var result = [];
+  String(raw).split(',').forEach(function (part) {
+    var trimmed = part.trim();
+    if (trimmed === '') return;
+    var matched = ROSTER.filter(function (name) {
+      return name.toLowerCase() === trimmed.toLowerCase();
+    })[0];
+    if (matched && result.indexOf(matched) === -1) result.push(matched);
+  });
+  return result;
+}
+
+/**
+ * Recompute eligibility factoring in who's absent tonight, per SPEC.md's
+ * Attendance rule: a movie that's otherwise eligible is filtered out only
+ * if some absent member hasn't personally seen it (their `seenBy` entry is
+ * falsy). Presence never adds eligibility -- only absence can remove it.
+ *
+ * `waitingOn` is deliberately left untouched here: it only ever reflects
+ * prequel-gating (see computeEligibility above). A movie knocked out by
+ * attendance still reports whatever waitingOn the prequel computation gave
+ * it (usually null) -- the frontend already has `seenBy` plus its own
+ * absent-member selection to explain an attendance-caused block, so
+ * overloading waitingOn for that too would be redundant and ambiguous
+ * about which reason actually applies.
+ *
+ * Fallback (SPEC.md): if the attendance filter would leave the eligible
+ * pool empty, drop the attendance criterion entirely for this request --
+ * every movie's eligibility reverts to the plain (pre-attendance) value,
+ * and `attendanceApplied` is false so the caller knows the criterion didn't
+ * actually apply. Assumes `absentNames` is already non-empty; callers
+ * should only invoke this when the request actually named someone absent.
+ *
+ * Returns { movies, attendanceApplied } — a new movies array (does not
+ * mutate input).
+ */
+function computeAttendanceEligibility(movies, absentNames) {
+  var baseEligible = movies.filter(function (m) { return m.eligible === true; });
+  var attendanceEligible = baseEligible.filter(function (m) {
+    return absentNames.every(function (name) {
+      return m.seenBy && m.seenBy[name] === true;
+    });
+  });
+
+  var applied = attendanceEligible.length > 0;
+
+  if (!applied) {
+    // Fallback: pool would be empty under the filter -- ignore attendance,
+    // movies keep their plain eligibility unchanged.
+    return { movies: movies.slice(), attendanceApplied: false };
+  }
+
+  var stillEligibleIds = {};
+  attendanceEligible.forEach(function (m) {
+    stillEligibleIds[m.id] = true;
+  });
+
+  var adjusted = movies.map(function (m) {
+    var out = {};
+    for (var k in m) {
+      if (Object.prototype.hasOwnProperty.call(m, k)) out[k] = m[k];
+    }
+    out.eligible = m.eligible === true && stillEligibleIds[m.id] === true;
+    return out;
+  });
+
+  return { movies: adjusted, attendanceApplied: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -289,20 +448,166 @@ function parseTmdbSearchResponse(tmdbJson) {
   return { posterUrl: posterUrl, cacheValue: posterUrl };
 }
 
+/** Pull the top TMDB search result's movie id out of a /search/movie response, or null. */
+function extractTmdbMovieId(tmdbJson) {
+  if (!tmdbJson || !Array.isArray(tmdbJson.results) || tmdbJson.results.length === 0) return null;
+  var top = tmdbJson.results[0];
+  return (top && typeof top.id === 'number') ? top.id : null;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming platforms (TMDB watch/providers)
+// ---------------------------------------------------------------------------
+
+/** Build the TMDB `watch/providers` request URL for an already-resolved TMDB movie id. */
+function buildTmdbProvidersUrl(apiKey, tmdbMovieId) {
+  return 'https://api.themoviedb.org/3/movie/' + encodeURIComponent(tmdbMovieId) +
+    '/watch/providers?api_key=' + encodeURIComponent(apiKey || '');
+}
+
+/**
+ * Parse a TMDB `watch/providers` response into a plain list of provider
+ * names for the fixed `US` region (per SPEC.md -- there's no per-user
+ * locale to key off of). Only the `flatrate` (subscription-included)
+ * offering counts as "currently carries the movie" -- rent/buy listings
+ * aren't included since those aren't a platform "carrying" it the way a
+ * subscription service is. Missing region/data (or a malformed response)
+ * yields an empty list, never an error -- an empty result is a valid,
+ * expected state per SPEC.md.
+ */
+function parseTmdbProvidersResponse(tmdbJson) {
+  if (!tmdbJson || !tmdbJson.results || !tmdbJson.results.US) return [];
+  var us = tmdbJson.results.US;
+  var flatrate = Array.isArray(us.flatrate) ? us.flatrate : [];
+  var seen = {};
+  var names = [];
+  flatrate.forEach(function (entry) {
+    var name = entry && entry.provider_name;
+    if (typeof name === 'string' && name.trim() !== '' && !seen[name]) {
+      seen[name] = true;
+      names.push(name);
+    }
+  });
+  return names;
+}
+
+// ---------------------------------------------------------------------------
+// Memorable quotes (Google Gemini API)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the Gemini `generateContent` request body for generating 2-4 short,
+ * character-attributed movie quotes. Uses `responseSchema` (structured
+ * output) so the response is guaranteed-parseable JSON -- a plain array of
+ * quote strings -- rather than free text we'd have to regex out of a
+ * paragraph. Chosen over the Anthropic API specifically so this app can run
+ * on Gemini's free tier (SPEC.md) -- no billing account required.
+ */
+function buildGeminiQuotesPayload(title, year) {
+  var titleWithYear = year ? (title + ' (' + year + ')') : title;
+  return {
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: 'List 2-4 short, memorable quotes from the movie "' + titleWithYear + '". ' +
+              'Attribute each quote to the speaking character where natural, appended as ' +
+              '" — Character Name". If you are not confident about real quotes from this specific ' +
+              'movie, return an empty array rather than inventing one.'
+          }
+        ]
+      }
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: {
+        type: 'ARRAY',
+        items: { type: 'STRING' }
+      }
+    }
+  };
+}
+
+/**
+ * True when a Gemini `generateContent` response indicates the request
+ * produced no usable candidate -- no `candidates` array at all, or the top
+ * candidate's `finishReason` is present and isn't `"STOP"` (e.g.
+ * `"SAFETY"`). Distinguishing this from "the model legitimately generated
+ * an empty array" matters for caching (see resolveQuotes_ in Code.js): a
+ * block should never be cached per SPEC.md -- always retry next time --
+ * while a genuine empty result from a successful generation is a real
+ * answer and gets cached like any other.
+ */
+function isGeminiBlocked(geminiJson) {
+  if (!geminiJson || !Array.isArray(geminiJson.candidates) || geminiJson.candidates.length === 0) return true;
+  var candidate = geminiJson.candidates[0];
+  return !!(candidate.finishReason && candidate.finishReason !== 'STOP');
+}
+
+/**
+ * Parse a Gemini `generateContent` response into a plain quotes array.
+ * Fails closed to an empty array on anything unexpected -- a block (see
+ * isGeminiBlocked above), missing/malformed content, or JSON that doesn't
+ * parse -- an empty array is itself a valid response per SPEC.md, so
+ * there's no separate error path here; a bad LLM response degrades exactly
+ * like "no quotes found" rather than surfacing as an API error.
+ *
+ * Because the request set `responseMimeType: "application/json"`, the
+ * generated text at `candidates[0].content.parts[0].text` is itself a JSON
+ * *string* we still have to JSON.parse() -- Gemini doesn't hand back
+ * already-parsed JSON in a separate field.
+ */
+function parseGeminiQuotesResponse(geminiJson) {
+  try {
+    if (isGeminiBlocked(geminiJson)) return [];
+    var content = geminiJson.candidates[0].content;
+    if (!content || !Array.isArray(content.parts) || content.parts.length === 0) return [];
+    var text = content.parts[0].text;
+    if (typeof text !== 'string') return [];
+    var parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) return [];
+    var quotes = parsed.filter(function (q) { return typeof q === 'string' && q.trim() !== ''; });
+    return quotes.slice(0, 4);
+  } catch (err) {
+    return [];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Output shaping
 // ---------------------------------------------------------------------------
 
-/** Shape an internal movie record + resolved posterUrl into the public API Movie object. */
-function toPublicMovie(movie, posterUrl) {
-  return {
+/** Build the public `seenBy` map: one boolean per roster member, in fixed roster order. */
+function buildPublicSeenBy(internalSeenBy) {
+  var out = {};
+  ROSTER.forEach(function (name) {
+    out[name] = !!(internalSeenBy && internalSeenBy[name] === true);
+  });
+  return out;
+}
+
+/**
+ * Shape an internal movie record + resolved posterUrl into the public API
+ * Movie object. `options.includeSeenBy` adds the `seenBy` map -- only the
+ * `list` response includes it (see SPEC.md's Attendance section); `spin`
+ * and the setWatched/setRating responses omit it.
+ */
+function toPublicMovie(movie, posterUrl, options) {
+  var opts = options || {};
+  var out = {
     id: movie.id,
     title: movie.title,
     year: movie.year,
     prequel: movie.prequel ? movie.prequel : null,
     watched: movie.watched,
+    rating: (movie.rating === null || movie.rating === undefined) ? null : movie.rating,
     eligible: movie.eligible,
     waitingOn: movie.waitingOn,
     posterUrl: (posterUrl === undefined ? null : posterUrl)
   };
+  if (opts.includeSeenBy) {
+    out.seenBy = buildPublicSeenBy(movie.seenBy);
+  }
+  return out;
 }

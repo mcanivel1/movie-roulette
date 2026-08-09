@@ -8,12 +8,15 @@ const {
   createMockPropertiesService,
   createMockSpreadsheetApp,
   createMockUrlFetchApp,
+  mockHttpResponse,
+  createMockCacheService,
   mockContentService
 } = require('./helpers');
 
 const SHARED_TOKEN = 'test-token-123';
 const SPREADSHEET_ID = 'fake-spreadsheet-id';
 const TMDB_API_KEY = 'fake-tmdb-key';
+const GEMINI_API_KEY = 'fake-gemini-key';
 
 // Header intentionally shuffled + has an extra column, to exercise real
 // order-independent header resolution end to end through doGet/doPost.
@@ -39,22 +42,25 @@ function tmdbResponder(url) {
   return { results: [] };
 }
 
-function setUp(sheetValues, sheetOptions) {
+function setUp(sheetValues, sheetOptions, responder) {
   const sheet = createMockSheet(sheetValues || buildSheetValues(), sheetOptions);
-  const fetchMock = createMockUrlFetchApp(tmdbResponder);
+  const fetchMock = createMockUrlFetchApp(responder || tmdbResponder);
   const spreadsheetAppMock = createMockSpreadsheetApp(sheet);
+  const cacheServiceMock = createMockCacheService();
   const context = loadGasContext(['Logic.js', 'Code.js'], {
     SpreadsheetApp: spreadsheetAppMock,
     PropertiesService: createMockPropertiesService({
       SPREADSHEET_ID,
       SHARED_TOKEN,
-      TMDB_API_KEY
+      TMDB_API_KEY,
+      GEMINI_API_KEY
     }),
     UrlFetchApp: fetchMock,
+    CacheService: cacheServiceMock,
     ContentService: mockContentService,
     console
   });
-  return { sheet, fetchMock, context, spreadsheetAppMock };
+  return { sheet, fetchMock, context, spreadsheetAppMock, cacheServiceMock };
 }
 
 // ---------------------------------------------------------------------------
@@ -258,4 +264,339 @@ test('doPost: non-boolean watched value is rejected as bad_request', () => {
     postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setWatched', id: 3, watched: 'yes' }) }
   });
   assert.deepEqual(res.json(), { error: 'bad_request' });
+});
+
+// ---------------------------------------------------------------------------
+// Ratings + Attendance fixtures
+// ---------------------------------------------------------------------------
+
+// Header intentionally shuffled + has an extra column, matching the base
+// fixture's convention, extended with Rating and the 8 member columns.
+const HEADER_V2 = [
+  'Watched', 'Movie', 'Year', 'Prequel', 'Notes', 'Poster URL', 'Rating',
+  'Austin', 'Eugie', 'Josh', 'Jouissance', 'Lynda', 'Marvin', 'Mel', 'Michelle'
+];
+
+function buildSheetValuesV2() {
+  return [
+    HEADER_V2,
+    // id 2: watched, rated 4.5, poster cached, everyone has seen it
+    [true, 'Prelude', 2010, '', 'n/a', 'https://image.tmdb.org/t/p/w500/prelude.jpg', 4.5, true, true, true, true, true, true, true, true],
+    // id 3: unwatched, no prequel -> eligible, unrated, poster missing -- everyone but Austin has seen it
+    [false, 'Part I', 2018, '', 'n/a', '', '', false, true, true, true, true, true, true, true],
+    // id 4: waiting on Part I (unwatched prequel), unrated, poster missing -- nobody's seen it
+    [false, 'Part II', 2020, 'Part I', 'n/a', '', '', false, false, false, false, false, false, false, false],
+    // id 5: watched, unrated, poster sentinel already cached
+    [true, 'Lost Reel', 2005, '', 'n/a', 'none', '', true, true, true, true, true, true, true, true]
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// doPost — setRating
+// ---------------------------------------------------------------------------
+
+test('doPost setRating: sets a valid half-step rating and returns the updated movie', () => {
+  const { context, sheet } = setUp(buildSheetValuesV2());
+  const res = context.doPost({
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setRating', id: 3, rating: 3.5 }) }
+  });
+  const body = res.json();
+  assert.equal(body.movie.id, 3);
+  assert.equal(body.movie.rating, 3.5);
+
+  const ratingColIdx = HEADER_V2.indexOf('Rating');
+  assert.equal(sheet._snapshot()[2][ratingColIdx], 3.5);
+});
+
+test('doPost setRating: rating null clears an existing rating', () => {
+  const { context, sheet } = setUp(buildSheetValuesV2());
+  const res = context.doPost({
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setRating', id: 2, rating: null }) }
+  });
+  const body = res.json();
+  assert.equal(body.movie.id, 2);
+  assert.equal(body.movie.rating, null);
+
+  const ratingColIdx = HEADER_V2.indexOf('Rating');
+  assert.equal(sheet._snapshot()[1][ratingColIdx], '');
+});
+
+test('doPost setRating: does not require watched === true (a stray rating on an unwatched row is accepted)', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const res = context.doPost({
+    // id 4 (Part II) is unwatched and not even eligible yet.
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setRating', id: 4, rating: 2 }) }
+  });
+  const body = res.json();
+  assert.equal(body.error, undefined);
+  assert.equal(body.movie.rating, 2);
+  assert.equal(body.movie.watched, false);
+});
+
+test('doPost setRating: rejects out-of-range, off-grid, and non-numeric ratings as bad_request', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const invalidValues = [0, -1, 5.5, 3.3, '4.5', undefined];
+  invalidValues.forEach((rating) => {
+    const body = { token: SHARED_TOKEN, action: 'setRating', id: 3 };
+    if (rating !== undefined) body.rating = rating;
+    const res = context.doPost({ postData: { contents: JSON.stringify(body) } });
+    assert.deepEqual(res.json(), { error: 'bad_request' }, `expected bad_request for rating ${JSON.stringify(rating)}`);
+  });
+});
+
+test('doPost setRating: unknown id returns not_found', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const res = context.doPost({
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setRating', id: 999, rating: 3 }) }
+  });
+  assert.deepEqual(res.json(), { error: 'not_found' });
+});
+
+test('doPost setRating: non-number id is rejected as bad_request', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const res = context.doPost({
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setRating', id: '3', rating: 3 }) }
+  });
+  assert.deepEqual(res.json(), { error: 'bad_request' });
+});
+
+test('doPost setRating: missing Rating column returns sheet_error', () => {
+  const values = [
+    ['Movie', 'Watched'],
+    ['Part I', false]
+  ];
+  const { context } = setUp(values);
+  const res = context.doPost({
+    postData: { contents: JSON.stringify({ token: SHARED_TOKEN, action: 'setRating', id: 2, rating: 3 }) }
+  });
+  assert.deepEqual(res.json(), { error: 'sheet_error' });
+});
+
+// ---------------------------------------------------------------------------
+// Attendance — GET action=list[&absent=...]
+// ---------------------------------------------------------------------------
+
+test('doGet list: every movie gets a full seenBy map, absent omitted entirely', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list' } });
+  const body = res.json();
+  assert.equal('attendanceApplied' in body, false);
+  const partI = body.movies.find((m) => m.title === 'Part I');
+  assert.deepEqual(partI.seenBy, {
+    Austin: false, Eugie: true, Josh: true, Jouissance: true, Lynda: true, Marvin: true, Mel: true, Michelle: true
+  });
+});
+
+test('doGet list: absent param applies normally when the absent member has seen the only eligible movie', () => {
+  // Part I is the only base-eligible movie in this fixture; Eugie has
+  // already seen it, so the attendance filter keeps it and actually
+  // "applies" (as opposed to the empty-pool fallback covered separately).
+  const { context } = setUp(buildSheetValuesV2());
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list', absent: 'Eugie' } });
+  const body = res.json();
+  assert.equal(body.attendanceApplied, true);
+  const partI = body.movies.find((m) => m.title === 'Part I');
+  assert.equal(partI.eligible, true); // Eugie has seen Part I -> stays eligible
+});
+
+test('doGet list: absent param empties the eligible pool -> fallback, attendanceApplied: false', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  // Part I is the only eligible movie, and Austin hasn't seen it -- the
+  // attendance filter would leave zero eligible, so it's dropped.
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list', absent: 'Austin' } });
+  const body = res.json();
+  assert.equal(body.attendanceApplied, false);
+  const partI = body.movies.find((m) => m.title === 'Part I');
+  assert.equal(partI.eligible, true); // fallback restores base eligibility
+});
+
+test('doGet list: absent omitted or blank behaves identically to everyone present', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const omitted = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list' } }).json();
+  const blank = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list', absent: '' } }).json();
+  assert.equal('attendanceApplied' in omitted, false);
+  assert.equal('attendanceApplied' in blank, false);
+});
+
+test('doGet list: absent naming only unrecognized members behaves like nobody absent (no attendanceApplied key)', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'list', absent: 'Bob,Xyz' } });
+  const body = res.json();
+  assert.equal('attendanceApplied' in body, false);
+});
+
+// ---------------------------------------------------------------------------
+// Attendance — GET action=spin[&absent=...]
+// ---------------------------------------------------------------------------
+
+test('doGet spin: absent param narrows the pool to only the movie the absent member has seen', () => {
+  // Two base-eligible movies; Austin hasn't seen Alpha but has seen Beta.
+  // Since Beta alone keeps the attendance-filtered pool non-empty, the
+  // filter genuinely applies (no fallback) and spin can only land on Beta.
+  const values = [
+    HEADER_V2,
+    [false, 'Alpha', 2001, '', 'n/a', 'none', '', false, true, true, true, true, true, true, true],
+    [false, 'Beta', 2002, '', 'n/a', 'none', '', true, true, true, true, true, true, true, true]
+  ];
+  const { context } = setUp(values);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'spin', absent: 'Austin' } });
+  const body = res.json();
+  assert.equal(body.attendanceApplied, true);
+  assert.equal(body.movie.title, 'Beta'); // the only one Austin has seen
+});
+
+test('doGet spin: seenBy is not included on the spin response', () => {
+  const { context } = setUp(buildSheetValuesV2());
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'spin' } });
+  const body = res.json();
+  assert.equal('seenBy' in body.movie, false);
+});
+
+// ---------------------------------------------------------------------------
+// GET action=details
+// ---------------------------------------------------------------------------
+
+function detailsResponder(url) {
+  if (url.includes('/watch/providers')) {
+    return { results: { US: { flatrate: [{ provider_name: 'Netflix' }, { provider_name: 'Hulu' }] } } };
+  }
+  if (url.includes('generativelanguage.googleapis.com')) {
+    return {
+      candidates: [{
+        finishReason: 'STOP',
+        content: { parts: [{ text: JSON.stringify(['"May the Force be with you." — Obi-Wan Kenobi']) }] }
+      }]
+    };
+  }
+  // TMDB title search -> resolves a TMDB movie id for the providers lookup
+  return { results: [{ id: 603, poster_path: '/partI.jpg' }] };
+}
+
+test('doGet details: returns streamingPlatforms and quotes for a valid id', () => {
+  const { context, fetchMock } = setUp(buildSheetValuesV2(), undefined, detailsResponder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  const body = res.json();
+  assert.deepEqual(body.streamingPlatforms, ['Netflix', 'Hulu']);
+  assert.deepEqual(body.quotes, ['"May the Force be with you." — Obi-Wan Kenobi']);
+  // search (to resolve TMDB id) + providers + gemini generateContent = 3 calls
+  assert.equal(fetchMock.calls.length, 3);
+});
+
+test('doGet details: unknown id returns not_found without calling TMDB or Gemini', () => {
+  const { context, fetchMock } = setUp(buildSheetValuesV2(), undefined, detailsResponder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '999' } });
+  assert.deepEqual(res.json(), { error: 'not_found' });
+  assert.equal(fetchMock.calls.length, 0);
+});
+
+test('doGet details: missing/non-numeric id returns not_found', () => {
+  const { context } = setUp(buildSheetValuesV2(), undefined, detailsResponder);
+  const missing = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details' } });
+  assert.deepEqual(missing.json(), { error: 'not_found' });
+  const nonNumeric = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: 'abc' } });
+  assert.deepEqual(nonNumeric.json(), { error: 'not_found' });
+});
+
+test('doGet details: a second call for the same movie is served from cache, no repeat TMDB/Gemini calls', () => {
+  const { context, fetchMock } = setUp(buildSheetValuesV2(), undefined, detailsResponder);
+  context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  assert.equal(fetchMock.calls.length, 3);
+
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  assert.deepEqual(res.json().streamingPlatforms, ['Netflix', 'Hulu']);
+  assert.deepEqual(res.json().quotes, ['"May the Force be with you." — Obi-Wan Kenobi']);
+  assert.equal(fetchMock.calls.length, 3); // unchanged -- both cached
+});
+
+test('doGet details: empty streamingPlatforms/quotes are valid, not an error', () => {
+  const emptyResponder = (url) => {
+    if (url.includes('/watch/providers')) return { results: {} };
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify([]) }] } }] };
+    }
+    return { results: [] }; // TMDB search finds nothing -> no id to look providers up with
+  };
+  const { context } = setUp(buildSheetValuesV2(), undefined, emptyResponder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  const body = res.json();
+  assert.deepEqual(body.streamingPlatforms, []);
+  assert.deepEqual(body.quotes, []);
+  assert.equal(body.error, undefined);
+});
+
+test('doGet details: TMDB/Gemini failure for this movie degrades to empty arrays instead of failing the whole request', () => {
+  // Every fetch (TMDB search, TMDB providers, Gemini generateContent) returns
+  // non-JSON, mirroring the "upstream is down" scenario poster resolution
+  // already isolates per-row -- the whole details response must still
+  // succeed with empty arrays rather than surfacing as sheet_error.
+  const sheet = createMockSheet(buildSheetValuesV2());
+  const fetchMock = {
+    calls: [],
+    fetch(url, options) {
+      this.calls.push({ url, options });
+      return { getResponseCode: () => 200, getContentText: () => 'Not JSON -- upstream is down' };
+    }
+  };
+  const context = loadGasContext(['Logic.js', 'Code.js'], {
+    SpreadsheetApp: createMockSpreadsheetApp(sheet),
+    PropertiesService: createMockPropertiesService({ SPREADSHEET_ID, SHARED_TOKEN, TMDB_API_KEY, GEMINI_API_KEY }),
+    UrlFetchApp: fetchMock,
+    CacheService: createMockCacheService(),
+    ContentService: mockContentService,
+    console
+  });
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  const body = res.json();
+  assert.equal(body.error, undefined);
+  assert.deepEqual(body.streamingPlatforms, []);
+  assert.deepEqual(body.quotes, []);
+});
+
+test('doGet details: a non-200 Gemini response (e.g. invalid API key) degrades to empty quotes and is not cached', () => {
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) return { results: { US: { flatrate: [{ provider_name: 'Netflix' }] } } };
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return mockHttpResponse(403, { error: { code: 403, message: 'API key not valid', status: 'PERMISSION_DENIED' } });
+    }
+    return { results: [{ id: 603, poster_path: '/partI.jpg' }] };
+  };
+  const { context, cacheServiceMock } = setUp(buildSheetValuesV2(), undefined, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  const body = res.json();
+  assert.equal(body.error, undefined);
+  assert.deepEqual(body.quotes, []);
+  assert.deepEqual(body.streamingPlatforms, ['Netflix']);
+  const quotesPutCalls = cacheServiceMock.calls.filter((c) => c.op === 'put' && c.key.startsWith('quotes:'));
+  assert.equal(quotesPutCalls.length, 0, 'a non-200 Gemini response must not be cached');
+});
+
+test('doGet details: a Gemini safety block (finishReason !== STOP) degrades to empty quotes and is not cached', () => {
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) return { results: { US: { flatrate: [{ provider_name: 'Netflix' }] } } };
+    if (url.includes('generativelanguage.googleapis.com')) return { candidates: [{ finishReason: 'SAFETY' }] };
+    return { results: [{ id: 603, poster_path: '/partI.jpg' }] };
+  };
+  const { context, cacheServiceMock } = setUp(buildSheetValuesV2(), undefined, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  const body = res.json();
+  assert.equal(body.error, undefined);
+  assert.deepEqual(body.quotes, []);
+  const quotesPutCalls = cacheServiceMock.calls.filter((c) => c.op === 'put' && c.key.startsWith('quotes:'));
+  assert.equal(quotesPutCalls.length, 0, 'a safety block must not be cached');
+});
+
+test('doGet details: quotes cache-only-on-success -- a genuinely empty Gemini result (finishReason STOP, empty array) IS cached', () => {
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) return { results: {} };
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify([]) }] } }] };
+    }
+    return { results: [{ id: 603, poster_path: '/partI.jpg' }] };
+  };
+  const { context, cacheServiceMock } = setUp(buildSheetValuesV2(), undefined, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  assert.deepEqual(res.json().quotes, []);
+  const quotesPutCalls = cacheServiceMock.calls.filter((c) => c.op === 'put' && c.key.startsWith('quotes:'));
+  assert.equal(quotesPutCalls.length, 1, 'a genuine (if empty) successful generation should be cached');
+  assert.equal(quotesPutCalls[0].value, '[]');
 });
