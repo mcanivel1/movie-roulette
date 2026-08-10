@@ -42,7 +42,15 @@ jobs:
         # with real care -- rotate it (re-run `clasp login`, update the
         # secret) if it's ever suspected of leaking, same as any other
         # credential in this repo.
-        run: echo '${{ secrets.CLASP_CREDENTIALS }}' > ~/.clasprc.json
+        #
+        # Secrets are passed in via `env:` and referenced as shell variables
+        # rather than interpolated directly into `run:` strings -- avoids
+        # YAML's `${{ }}` colliding with flow-mapping syntax in a plain
+        # scalar, and avoids feeding secret content straight into shell
+        # command-line parsing.
+        env:
+          CLASP_CREDENTIALS: ${{ secrets.CLASP_CREDENTIALS }}
+        run: echo "$CLASP_CREDENTIALS" > ~/.clasprc.json
 
       - name: Restore .clasp.json
         # Per-developer/CI project file (gitignored locally -- see
@@ -50,10 +58,12 @@ jobs:
         # to. The script ID isn't itself sensitive, but keeping it out of
         # git avoids hardcoding an environment-specific value into the repo.
         working-directory: apps-script
+        env:
+          CLASP_SCRIPT_ID: ${{ secrets.CLASP_SCRIPT_ID }}
         run: |
           cat > .clasp.json <<EOF
           {
-            "scriptId": "${{ secrets.CLASP_SCRIPT_ID }}",
+            "scriptId": "$CLASP_SCRIPT_ID",
             "rootDir": ""
           }
           EOF
@@ -68,4 +78,8 @@ jobs:
         # VITE_API_URL actually points to) to a new version. Without -i,
         # `clasp deploy` creates a brand new deployment with its own new
         # URL instead -- the frontend would keep calling the old one.
-        run: clasp deploy -i "${{ secrets.CLASP_DEPLOYMENT_ID }}" -d "Auto-deploy: ${{ github.sha }}"
+        # GITHUB_SHA is already set in the environment by the runner, no
+        # need to pass it in explicitly.
+        env:
+          CLASP_DEPLOYMENT_ID: ${{ secrets.CLASP_DEPLOYMENT_ID }}
+        run: clasp deploy -i "$CLASP_DEPLOYMENT_ID" -d "Auto-deploy $GITHUB_SHA"
