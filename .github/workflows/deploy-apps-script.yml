@@ -1,0 +1,71 @@
+name: Deploy Apps Script backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps-script/**"
+  workflow_dispatch:
+
+concurrency:
+  group: apps-script-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run backend tests
+        working-directory: apps-script
+        # Zero dependencies (node --test, no package-lock.json) -- a safety
+        # gate before anything gets pushed to the live Apps Script project.
+        # A red suite stops here; nothing below this step runs.
+        run: npm test
+
+      - name: Install clasp
+        run: npm install -g @google/clasp
+
+      - name: Restore clasp credentials
+        # clasp normally gets these from `clasp login`'s browser OAuth flow,
+        # which CI can't do -- so the contents of a real `clasp login` run
+        # (from whoever set this up) are stored as a repo secret instead and
+        # written back out here. This is a personal Google-account OAuth
+        # token: broad, and long-lived until rotated. Treat CLASP_CREDENTIALS
+        # with real care -- rotate it (re-run `clasp login`, update the
+        # secret) if it's ever suspected of leaking, same as any other
+        # credential in this repo.
+        run: echo '${{ secrets.CLASP_CREDENTIALS }}' > ~/.clasprc.json
+
+      - name: Restore .clasp.json
+        # Per-developer/CI project file (gitignored locally -- see
+        # apps-script/README.md) recording which Apps Script project to push
+        # to. The script ID isn't itself sensitive, but keeping it out of
+        # git avoids hardcoding an environment-specific value into the repo.
+        working-directory: apps-script
+        run: |
+          cat > .clasp.json <<EOF
+          {
+            "scriptId": "${{ secrets.CLASP_SCRIPT_ID }}",
+            "rootDir": ""
+          }
+          EOF
+
+      - name: Push source
+        working-directory: apps-script
+        run: clasp push --force
+
+      - name: Deploy new version
+        working-directory: apps-script
+        # Updates the EXISTING deployment (the one the frontend's
+        # VITE_API_URL actually points to) to a new version. Without -i,
+        # `clasp deploy` creates a brand new deployment with its own new
+        # URL instead -- the frontend would keep calling the old one.
+        run: clasp deploy -i "${{ secrets.CLASP_DEPLOYMENT_ID }}" -d "Auto-deploy: ${{ github.sha }}"
