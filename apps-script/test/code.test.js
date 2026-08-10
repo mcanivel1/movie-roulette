@@ -528,6 +528,7 @@ test('doGet details: returns streamingPlatforms and quotes for a valid id', () =
   assert.deepEqual(body.quotes, ['"May the Force be with you." — Obi-Wan Kenobi']);
   // search (to resolve TMDB id) + providers + gemini generateContent = 3 calls
   assert.equal(fetchMock.calls.length, 3);
+  assert.equal('_quotesDebug' in body, false, 'the temporary debug field must stay scoped to the empty-quotes case -- omitted entirely on a real result');
 });
 
 test('doGet details: the Gemini request targets a current, non-retired model string', () => {
@@ -616,6 +617,12 @@ test('doGet details: TMDB/Gemini failure for this movie degrades to empty arrays
   assert.equal(body.error, undefined);
   assert.deepEqual(body.streamingPlatforms, []);
   assert.deepEqual(body.quotes, []);
+  // TEMPORARY debug field (see resolveQuotes_/detailsAction_) -- remove this
+  // assertion along with the field once the live "quotes always empty"
+  // investigation is closed.
+  assert.equal(body._quotesDebug.type, 'exception');
+  assert.equal(typeof body._quotesDebug.message, 'string');
+  assert.notEqual(body._quotesDebug.message, '');
 });
 
 test('doGet details: a title with multiple TMDB entries across years resolves streaming platforms for the year-matched movie id, not TMDB\'s top hit', () => {
@@ -691,6 +698,12 @@ test('doGet details: a non-200 Gemini response (e.g. invalid API key) degrades t
   assert.deepEqual(body.streamingPlatforms, ['Netflix']);
   const quotesPutCalls = cacheServiceMock.calls.filter((c) => c.op === 'put' && c.key.startsWith('quotes:'));
   assert.equal(quotesPutCalls.length, 0, 'a non-200 Gemini response must not be cached');
+  // TEMPORARY debug field (see resolveQuotes_/detailsAction_).
+  assert.deepEqual(body._quotesDebug, {
+    type: 'http_error',
+    status: 403,
+    body: JSON.stringify({ error: { code: 403, message: 'API key not valid', status: 'PERMISSION_DENIED' } })
+  });
 });
 
 test('doGet details: a Gemini safety block (finishReason !== STOP) degrades to empty quotes and is not cached', () => {
@@ -706,6 +719,8 @@ test('doGet details: a Gemini safety block (finishReason !== STOP) degrades to e
   assert.deepEqual(body.quotes, []);
   const quotesPutCalls = cacheServiceMock.calls.filter((c) => c.op === 'put' && c.key.startsWith('quotes:'));
   assert.equal(quotesPutCalls.length, 0, 'a safety block must not be cached');
+  // TEMPORARY debug field (see resolveQuotes_/detailsAction_).
+  assert.deepEqual(body._quotesDebug, { type: 'blocked', reason: 'SAFETY' });
 });
 
 test('doGet details: quotes cache-only-on-success -- a genuinely empty Gemini result (finishReason STOP, empty array) IS cached', () => {
@@ -716,10 +731,26 @@ test('doGet details: quotes cache-only-on-success -- a genuinely empty Gemini re
     }
     return { results: [{ id: 603, poster_path: '/partI.jpg' }] };
   };
-  const { context, cacheServiceMock } = setUp(buildSheetValuesV2(), undefined, responder);
+  const { context, cacheServiceMock, fetchMock } = setUp(buildSheetValuesV2(), undefined, responder);
   const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
-  assert.deepEqual(res.json().quotes, []);
+  const body = res.json();
+  assert.deepEqual(body.quotes, []);
   const quotesPutCalls = cacheServiceMock.calls.filter((c) => c.op === 'put' && c.key.startsWith('quotes:'));
   assert.equal(quotesPutCalls.length, 1, 'a genuine (if empty) successful generation should be cached');
   assert.equal(quotesPutCalls[0].value, '[]');
+  // TEMPORARY debug field (see resolveQuotes_/detailsAction_): a real,
+  // successful-but-empty generation is distinguishable from the three
+  // failure cases above -- this is what tells the live investigation
+  // "Gemini worked fine, there just weren't any quotes" vs. "something's
+  // actually broken."
+  assert.deepEqual(body._quotesDebug, { type: 'empty_success' });
+
+  // Second call for the same movie: served from cache, no repeat Gemini
+  // call -- but the debug field should say so explicitly (`cached_empty`),
+  // not silently repeat `empty_success` as if a fresh generation happened.
+  const callsBeforeSecond = fetchMock.calls.length;
+  const second = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } }).json();
+  assert.deepEqual(second.quotes, []);
+  assert.deepEqual(second._quotesDebug, { type: 'cached_empty' });
+  assert.equal(fetchMock.calls.length, callsBeforeSecond, 'the second call must be served from cache, not re-hit Gemini');
 });

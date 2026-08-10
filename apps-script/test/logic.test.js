@@ -648,6 +648,85 @@ test('parseTmdbProvidersResponse: multiple genuinely distinct services with ad-t
 });
 
 // ---------------------------------------------------------------------------
+// Streaming platforms: "plus" tier/add-on qualifier (product-owner follow-up
+// to the ad-tier fix above -- "Peacock" and "Peacock Plus" showing up as two
+// separate pills). Since "plus" is also part of several real brand names
+// (Disney Plus, Apple TV Plus, Paramount Plus, ESPN Plus), the important
+// thing to verify is that stripping it only ever changes what's *displayed*
+// when there's an actual plain-name collision in the same results list --
+// a standalone "Disney Plus" with no competing plain "Disney" entry must
+// pass through completely unchanged, not get silently renamed to "Disney".
+// ---------------------------------------------------------------------------
+
+test('normalizeProviderBrandKey: "plus" is stripped as a qualifier word, same as the ad-tier words', () => {
+  assert.equal(ctx.normalizeProviderBrandKey('Peacock'), 'peacock');
+  assert.equal(ctx.normalizeProviderBrandKey('Peacock Plus'), 'peacock');
+  assert.equal(ctx.normalizeProviderBrandKey('Peacock Premium Plus'), 'peacock');
+});
+
+test('parseTmdbProvidersResponse: "Peacock" and "Peacock Plus" collapse into a single "Peacock" pill', () => {
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(flatrateJson(['Peacock', 'Peacock Plus'])), ['Peacock']);
+});
+
+test('parseTmdbProvidersResponse: a standalone "Disney Plus" with no competing plain "Disney" entry passes through completely unchanged', () => {
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(flatrateJson(['Disney Plus'])), ['Disney Plus']);
+});
+
+test('parseTmdbProvidersResponse: standalone real "...Plus" brand names never collide with each other or get mangled', () => {
+  // None of these share an underlying service -- "plus" being a shared
+  // qualifier word must not merge Disney Plus into Apple TV Plus, etc.
+  const json = flatrateJson(['Disney Plus', 'Apple TV Plus', 'Paramount Plus', 'ESPN Plus']);
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(json), ['Disney Plus', 'Apple TV Plus', 'Paramount Plus', 'ESPN Plus']);
+});
+
+test('parseTmdbProvidersResponse: "Disney" and "Disney Plus" together DO collapse -- a real plain/add-on pair, not a false merge', () => {
+  // Distinguishes "wrongly merging unrelated services" (not happening, per
+  // the test above) from "correctly collapsing an actual plain+add-on pair
+  // for the same brand" (happening here, by design, same as Peacock).
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(flatrateJson(['Disney', 'Disney Plus'])), ['Disney']);
+});
+
+// ---------------------------------------------------------------------------
+// Streaming platforms: channel-partner phrases ("Apple TV Channel", "Amazon
+// Channel", "Roku Premium Channel") -- TMDB lists a service subscribed to
+// via a different storefront as its own separate provider entry (e.g.
+// "Britbox" vs "Britbox Apple TV Channel"). Real production example that
+// prompted this: a details response with streamingPlatforms
+// ["Philo", "AMC+ Roku Premium Channel", "AMC"].
+// ---------------------------------------------------------------------------
+
+test('normalizeProviderBrandKey: strips known channel-partner phrases as a whole unit', () => {
+  assert.equal(ctx.normalizeProviderBrandKey('Britbox'), 'britbox');
+  assert.equal(ctx.normalizeProviderBrandKey('Britbox Apple TV Channel'), 'britbox');
+  assert.equal(ctx.normalizeProviderBrandKey('Britbox Amazon Channel'), 'britbox');
+});
+
+test('normalizeProviderBrandKey: phrase stripping runs before word-level qualifier stripping, so "premium" inside "Roku Premium Channel" doesn\'t get stripped out from under the phrase', () => {
+  // If word-level stripping ran first, "premium" would be removed on its
+  // own, leaving a dangling "roku ... channel" that the phrase pass could
+  // no longer match as a unit -- this pins down the processing order.
+  assert.equal(ctx.normalizeProviderBrandKey('AMC+ Roku Premium Channel'), 'amc+');
+});
+
+test('parseTmdbProvidersResponse: "Britbox" and its Apple TV/Amazon channel-partner variants collapse into a single "Britbox" pill', () => {
+  const json = flatrateJson(['Britbox', 'Britbox Apple TV Channel', 'Britbox Amazon Channel']);
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(json), ['Britbox']);
+});
+
+test('parseTmdbProvidersResponse: real production example -- Philo, AMC+ Roku Premium Channel, and AMC all appear, AMC+ does NOT collapse into AMC', () => {
+  // AMC+ is treated as a genuinely distinct product tier from base AMC --
+  // only the "Roku Premium Channel" phrase is stripped, leaving "AMC+" and
+  // "AMC" as different brand keys ("amc+" vs "amc"). See
+  // normalizeProviderBrandKey's doc comment for the reasoning.
+  const json = flatrateJson(['Philo', 'AMC+ Roku Premium Channel', 'AMC']);
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(json), ['Philo', 'AMC+ Roku Premium Channel', 'AMC']);
+});
+
+test('parseTmdbProvidersResponse: a standalone channel-partner variant with no plain version present still surfaces something, not dropped', () => {
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(flatrateJson(['Britbox Apple TV Channel'])), ['Britbox Apple TV Channel']);
+});
+
+// ---------------------------------------------------------------------------
 // Quotes (Google Gemini API)
 // ---------------------------------------------------------------------------
 

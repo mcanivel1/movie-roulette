@@ -515,12 +515,34 @@ function buildTmdbProvidersUrl(apiKey, tmdbMovieId) {
 // Tier/qualifier words TMDB appends to a provider's plain brand name to list
 // an ad-supported (or other tier) variant as its own separate provider
 // entry -- e.g. "Netflix" and "Netflix Standard with Ads" are the same
-// underlying service. Order matters: multi-word phrases must be stripped
-// before the single words they contain ("with ads" before "ads"), or
-// stripping "ads" first leaves a dangling "with" that "with ads" can no
-// longer match. Not Netflix-specific -- TMDB applies the same pattern to
-// Hulu, Peacock, and others, so this generalizes to any service name.
-var PROVIDER_TIER_QUALIFIERS = ['with ads', 'ads', 'standard', 'basic', 'premium'];
+// underlying service. "plus" covers the equivalent pattern for tiered add-on
+// entries like "Peacock" / "Peacock Plus" -- note this only ever changes
+// what's *displayed* when there's an actual plain-name collision within the
+// same results list (parseTmdbProvidersResponse only overwrites a brand's
+// display name when a plainer variant is found among its duplicates); a
+// standalone "Disney Plus"/"Apple TV Plus"/"Paramount Plus"/"ESPN Plus" with
+// no competing plain entry in the same list has nothing to collapse against
+// and passes through unchanged, even though "plus" is part of those brands'
+// real names, not a tier qualifier. Order matters: multi-word phrases must
+// be stripped before the single words they contain ("with ads" before
+// "ads"), or stripping "ads" first leaves a dangling "with" that "with ads"
+// can no longer match. Not Netflix-specific -- TMDB applies the same
+// ad-tier/add-on pattern to Hulu, Peacock, and others, so this generalizes
+// to any service name.
+var PROVIDER_TIER_QUALIFIERS = ['with ads', 'ads', 'standard', 'basic', 'premium', 'plus'];
+
+// TMDB also lists a service subscribed to *through* a different storefront
+// as its own separate provider entry -- e.g. "Britbox", "Britbox Apple TV
+// Channel", and "Britbox Amazon Channel" are all the same underlying
+// service, just billed via a different channel-partner storefront. These
+// are checked as whole PHRASES, and checked *before* PROVIDER_TIER_QUALIFIERS
+// above -- "Roku Premium Channel" contains the word "premium", and if the
+// single-word qualifier pass ran first it would strip "premium" out from
+// under this phrase and leave a dangling "roku ... channel" that can never
+// match as a unit. Trivially extensible: add more confirmed phrases here as
+// they turn up in real TMDB data (all lowercase, to match how
+// normalizeProviderBrandKey compares against the already-lowercased key).
+var PROVIDER_CHANNEL_PARTNER_PHRASES = ['apple tv channel', 'amazon channel', 'roku premium channel'];
 
 /** Escape RegExp-special characters so a plain word/phrase can be embedded in a pattern literally. */
 function escapeRegExpChars_(str) {
@@ -529,15 +551,29 @@ function escapeRegExpChars_(str) {
 
 /**
  * Normalize a TMDB provider name to a brand key for dedup purposes (see
- * PROVIDER_TIER_QUALIFIERS above). Lowercases, strips known tier/qualifier
- * words wherever they appear *as whole words* (`\b`-bounded -- "ads" must
- * not match inside an unrelated word like a hypothetical "Radsson+"; a
- * plain substring split/join would wrongly mangle that), and collapses the
- * resulting whitespace -- both "Netflix" and "Netflix Standard with Ads"
- * normalize to "netflix".
+ * PROVIDER_TIER_QUALIFIERS and PROVIDER_CHANNEL_PARTNER_PHRASES above).
+ * Lowercases, strips known channel-partner phrases first and then
+ * tier/qualifier words, both *as whole words/phrases* (`\b`-bounded --
+ * "ads" must not match inside an unrelated word like a hypothetical
+ * "Radsson+"; a plain substring split/join would wrongly mangle that), and
+ * collapses the resulting whitespace -- "Netflix", "Netflix Standard with
+ * Ads", and "Britbox Apple TV Channel"/"Britbox" (via the phrase list) all
+ * normalize their respective brands down to a bare name like "netflix" or
+ * "britbox".
+ *
+ * Deliberately does NOT collapse "AMC" and "AMC+ Roku Premium Channel" down
+ * to the same key -- stripping the "Roku Premium Channel" phrase leaves
+ * "amc+", not "amc"; the trailing "+" is treated as a meaningful part of
+ * the brand name (AMC+ is plausibly a genuinely distinct product tier from
+ * base AMC), not something to normalize away. Only the channel-partner
+ * *phrase itself* is stripped, never anything else in the name.
  */
 function normalizeProviderBrandKey(name) {
   var key = name.toLowerCase();
+  PROVIDER_CHANNEL_PARTNER_PHRASES.forEach(function (phrase) {
+    var pattern = new RegExp('\\b' + escapeRegExpChars_(phrase) + '\\b', 'g');
+    key = key.replace(pattern, ' ');
+  });
   PROVIDER_TIER_QUALIFIERS.forEach(function (qualifier) {
     var pattern = new RegExp('\\b' + escapeRegExpChars_(qualifier) + '\\b', 'g');
     key = key.replace(pattern, ' ');

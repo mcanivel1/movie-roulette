@@ -320,6 +320,20 @@ function resolveStreamingPlatforms_(props, movie) {
  * resolveStreamingPlatforms_'s fail-open-for-retry shape above -- and the
  * same fix QA caught when this cached unconditionally on the old
  * Anthropic-backed path.
+ *
+ * Returns `{ quotes, debug }`. `debug` is non-null exactly when `quotes` is
+ * empty, and says *why*:
+ *   { type: 'exception', message }
+ *   { type: 'http_error', status, body }
+ *   { type: 'blocked', reason }
+ *   { type: 'empty_success' }      -- Gemini responded fine, genuinely 0 quotes
+ *   { type: 'cached_empty' }       -- served from cache; see below
+ * TEMPORARY: this `debug` field only exists to power detailsAction_'s
+ * `_quotesDebug` response field, added to chase a live "quotes always
+ * empty" report by piggybacking on the Network-tab debugging channel the
+ * product owner already has working (Apps Script's Executions panel proved
+ * unusable for them). Remove `debug` here and `_quotesDebug` in
+ * detailsAction_ together once that investigation is resolved.
  */
 function resolveQuotes_(props, movie) {
   var cache = CacheService.getScriptCache();
@@ -327,7 +341,14 @@ function resolveQuotes_(props, movie) {
   var cached = cache.get(key);
   if (cached !== null) {
     try {
-      return JSON.parse(cached);
+      var cachedQuotes = JSON.parse(cached);
+      // A cache hit that's empty means some earlier request already
+      // resolved this to a genuine `empty_success` (that's the only way an
+      // empty result gets cached at all, per the fail-open-for-retry rule
+      // below) -- but that earlier request's specific reasoning wasn't
+      // itself cached, so this is as precise as we can be after the fact.
+      var cachedDebug = cachedQuotes.length === 0 ? { type: 'cached_empty' } : null;
+      return { quotes: cachedQuotes, debug: cachedDebug };
     } catch (err) {
       // Corrupt cache entry -- fall through and recompute.
     }
@@ -351,9 +372,10 @@ function resolveQuotes_(props, movie) {
       // Cloud Logging via `clasp logs`, which needs a linked GCP project.
       // Gemini error bodies usually carry a useful error.message -- log the
       // raw text rather than bothering to parse it out, still readable by eye.
+      var errorBody = response.getContentText();
       console.error('[quotes] Gemini returned non-200 for "' + movie.title + '": status=' +
-        response.getResponseCode() + ' body=' + response.getContentText());
-      return [];
+        response.getResponseCode() + ' body=' + errorBody);
+      return { quotes: [], debug: { type: 'http_error', status: response.getResponseCode(), body: errorBody.slice(0, 500) } };
     }
     var json = JSON.parse(response.getContentText());
     if (isGeminiBlocked(json)) {
@@ -361,18 +383,19 @@ function resolveQuotes_(props, movie) {
       var blockReason = candidate ? candidate.finishReason : (json && json.promptFeedback && json.promptFeedback.blockReason);
       console.error('[quotes] Gemini blocked the request for "' + movie.title + '": ' +
         (blockReason ? ('reason=' + blockReason) : 'no candidates and no promptFeedback.blockReason -- raw response: ' + JSON.stringify(json)));
-      return [];
+      return { quotes: [], debug: { type: 'blocked', reason: blockReason || null } };
     }
     var quotes = parseGeminiQuotesResponse(json);
     cache.put(key, JSON.stringify(quotes), DETAILS_CACHE_TTL_SECONDS);
-    return quotes;
+    return { quotes: quotes, debug: quotes.length === 0 ? { type: 'empty_success' } : null };
   } catch (err) {
     // Gemini unreachable / non-JSON response -- degrade to empty for THIS
     // request only. Deliberately not cached (see doc comment above), so a
     // transient failure gets retried next time.
+    var errorMessage = (err && err.message) ? err.message : String(err);
     console.error('[quotes] threw while fetching quotes for "' + movie.title + '": ' +
       (err && err.stack ? err.stack : err));
-    return [];
+    return { quotes: [], debug: { type: 'exception', message: errorMessage } };
   }
 }
 
@@ -390,10 +413,24 @@ function detailsAction_(sheet, idParam, props) {
   var movie = findMovieById(movies, id);
   if (!movie) return { error: 'not_found' };
 
-  return {
+  var quotesResult = resolveQuotes_(props, movie);
+  var result = {
     streamingPlatforms: resolveStreamingPlatforms_(props, movie),
-    quotes: resolveQuotes_(props, movie)
+    quotes: quotesResult.quotes
   };
+
+  // TEMPORARY DEBUG FIELD -- added to chase a live "quotes always empty"
+  // report via the browser Network tab (the product owner couldn't get
+  // Apps Script's Executions panel to expand and show the console.error
+  // output above). Only present when quotes is actually empty, so it stays
+  // obviously scoped to debugging that case and never touches a normal
+  // non-empty result. Remove this block (and the `debug` field it reads
+  // from resolveQuotes_'s return value) once that investigation is closed.
+  if (quotesResult.quotes.length === 0 && quotesResult.debug) {
+    result._quotesDebug = quotesResult.debug;
+  }
+
+  return result;
 }
 
 // ---------------------------------------------------------------------------
