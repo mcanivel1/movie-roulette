@@ -419,16 +419,10 @@ function detailsAction_(sheet, idParam, props) {
     quotes: quotesResult.quotes
   };
 
-  // TEMPORARY DEBUG FIELD -- added to chase a live "quotes always empty"
-  // report via the browser Network tab (the product owner couldn't get
-  // Apps Script's Executions panel to expand and show the console.error
-  // output above). Only present when quotes is actually empty, so it stays
-  // obviously scoped to debugging that case and never touches a normal
-  // non-empty result. Remove this block (and the `debug` field it reads
-  // from resolveQuotes_'s return value) once that investigation is closed.
-  if (quotesResult.quotes.length === 0 && quotesResult.debug) {
-    result._quotesDebug = quotesResult.debug;
-  }
+  // Debugging aid -- uncomment to surface why quotes came back empty.
+  // if (quotesResult.quotes.length === 0 && quotesResult.debug) {
+  //   result._quotesDebug = quotesResult.debug;
+  // }
 
   return result;
 }
