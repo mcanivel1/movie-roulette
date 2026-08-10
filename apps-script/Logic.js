@@ -522,19 +522,25 @@ function buildTmdbProvidersUrl(apiKey, tmdbMovieId) {
 // Hulu, Peacock, and others, so this generalizes to any service name.
 var PROVIDER_TIER_QUALIFIERS = ['with ads', 'ads', 'standard', 'basic', 'premium'];
 
+/** Escape RegExp-special characters so a plain word/phrase can be embedded in a pattern literally. */
+function escapeRegExpChars_(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Normalize a TMDB provider name to a brand key for dedup purposes (see
  * PROVIDER_TIER_QUALIFIERS above). Lowercases, strips known tier/qualifier
- * words wherever they appear, and collapses the resulting whitespace --
- * both "Netflix" and "Netflix Standard with Ads" normalize to "netflix".
- * Plain string split/join (not RegExp) since qualifiers are fixed
- * words/phrases, not patterns, and this sidesteps regex-special-character
- * escaping entirely.
+ * words wherever they appear *as whole words* (`\b`-bounded -- "ads" must
+ * not match inside an unrelated word like a hypothetical "Radsson+"; a
+ * plain substring split/join would wrongly mangle that), and collapses the
+ * resulting whitespace -- both "Netflix" and "Netflix Standard with Ads"
+ * normalize to "netflix".
  */
 function normalizeProviderBrandKey(name) {
   var key = name.toLowerCase();
   PROVIDER_TIER_QUALIFIERS.forEach(function (qualifier) {
-    key = key.split(qualifier).join(' ');
+    var pattern = new RegExp('\\b' + escapeRegExpChars_(qualifier) + '\\b', 'g');
+    key = key.replace(pattern, ' ');
   });
   return key.replace(/\s+/g, ' ').trim();
 }

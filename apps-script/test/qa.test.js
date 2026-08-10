@@ -746,26 +746,26 @@ test('QA: a year-matched TMDB result with no poster_path resolves to posterUrl: 
 });
 
 // ---------------------------------------------------------------------------
-// Streaming platforms: normalizeProviderBrandKey's qualifier stripping
-// (bug B fix) uses plain substring split/join against a fixed word list
-// ('with ads', 'ads', 'standard', 'basic', 'premium'), not word-boundary
-// matching. That's safe against every provider TMDB's US catalog actually
-// contains today, but it's a real latent fragility worth documenting
-// explicitly: a hypothetical (or future TMDB-added) brand name that merely
-// *contains* one of those words as a substring -- not as a separate
-// qualifier word -- would get corrupted, not just de-qualified. Flagging to
-// backend-dev as a known limitation rather than a live bug, since nothing
-// in TMDB's current provider list triggers it.
+// Streaming platforms: normalizeProviderBrandKey's qualifier stripping (bug
+// B fix) originally used plain substring split/join against a fixed word
+// list ('with ads', 'ads', 'standard', 'basic', 'premium'), which was safe
+// against every provider TMDB's US catalog actually contains today but was
+// a real latent fragility -- a hypothetical (or future TMDB-added) brand
+// name that merely *contains* one of those words as a substring, not as its
+// own qualifier word, would get corrupted rather than just de-qualified.
+// QA originally flagged this as a known (non-live) limitation with a
+// constructed "Radsson+" example; backend-dev switched the stripping to
+// \b-bounded RegExp matching in response, so this now locks in the fix
+// instead of documenting the gap.
 // ---------------------------------------------------------------------------
 
-test('QA: qualifier stripping is substring-anywhere, not word-boundary-safe -- a brand name that merely contains a qualifier word gets corrupted (documents a latent fragility, not a live bug against today\'s TMDB catalog)', () => {
+test('QA: qualifier stripping is word-boundary-safe -- a brand name that merely contains a qualifier word as a substring is left intact', () => {
   const { loadGasContext: load } = require('./helpers');
   const ctx = load(['Logic.js']);
   // "Radsson+" is not a real TMDB provider -- constructed purely to show
-  // 'ads' matching inside an unrelated word ("r-ADS-son+") rather than as
-  // its own qualifier token. If a real provider ever ships a name like this,
-  // its pill would silently show mangled text instead of the real name.
-  assert.equal(ctx.normalizeProviderBrandKey('Radsson+'), 'r son+', 'documents that "ads" strips mid-word, not just as a standalone qualifier -- worth a word-boundary fix if this class of name ever appears in TMDB\'s real catalog');
+  // 'ads' embedded mid-word ("r-ADS-son+") must NOT be treated as the
+  // standalone "ads" qualifier token now that stripping is \b-bounded.
+  assert.equal(ctx.normalizeProviderBrandKey('Radsson+'), 'radsson+', 'a qualifier word embedded inside an unrelated word must not be stripped -- only standalone qualifier tokens should be');
 });
 
 test('QA: a provider name that strips down to nothing (matches only qualifier words, no brand left) is dropped, not shown as a blank pill', () => {
