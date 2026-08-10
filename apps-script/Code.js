@@ -345,10 +345,22 @@ function resolveQuotes_(props, movie) {
       muteHttpExceptions: true
     });
     if (response.getResponseCode() !== 200) {
+      // Diagnostic only -- behavior is unchanged (still [], still uncached).
+      // Apps Script's basic Executions panel (Extensions > Apps Script >
+      // Executions) shows console.error output with zero extra setup, unlike
+      // Cloud Logging via `clasp logs`, which needs a linked GCP project.
+      // Gemini error bodies usually carry a useful error.message -- log the
+      // raw text rather than bothering to parse it out, still readable by eye.
+      console.error('[quotes] Gemini returned non-200 for "' + movie.title + '": status=' +
+        response.getResponseCode() + ' body=' + response.getContentText());
       return [];
     }
     var json = JSON.parse(response.getContentText());
     if (isGeminiBlocked(json)) {
+      var candidate = json && Array.isArray(json.candidates) && json.candidates[0];
+      var blockReason = candidate ? candidate.finishReason : (json && json.promptFeedback && json.promptFeedback.blockReason);
+      console.error('[quotes] Gemini blocked the request for "' + movie.title + '": ' +
+        (blockReason ? ('reason=' + blockReason) : 'no candidates and no promptFeedback.blockReason -- raw response: ' + JSON.stringify(json)));
       return [];
     }
     var quotes = parseGeminiQuotesResponse(json);
@@ -358,6 +370,8 @@ function resolveQuotes_(props, movie) {
     // Gemini unreachable / non-JSON response -- degrade to empty for THIS
     // request only. Deliberately not cached (see doc comment above), so a
     // transient failure gets retried next time.
+    console.error('[quotes] threw while fetching quotes for "' + movie.title + '": ' +
+      (err && err.stack ? err.stack : err));
     return [];
   }
 }
