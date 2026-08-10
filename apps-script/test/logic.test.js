@@ -595,6 +595,59 @@ test('parseTmdbProvidersResponse: missing US region or flatrate list returns emp
 });
 
 // ---------------------------------------------------------------------------
+// Streaming platforms: ad-tier/qualifier variants of the same brand must
+// collapse into a single entry (real product-owner-reported bug -- TMDB
+// lists "Netflix" and "Netflix Standard with Ads" as two separate provider
+// entries for the same underlying service).
+// ---------------------------------------------------------------------------
+
+function flatrateJson(names) {
+  return { results: { US: { flatrate: names.map(function (n) { return { provider_name: n }; }) } } };
+}
+
+test('normalizeProviderBrandKey: strips known tier/qualifier words and collapses whitespace', () => {
+  assert.equal(ctx.normalizeProviderBrandKey('Netflix'), 'netflix');
+  assert.equal(ctx.normalizeProviderBrandKey('Netflix Standard with Ads'), 'netflix');
+  assert.equal(ctx.normalizeProviderBrandKey('Netflix with Ads'), 'netflix');
+  assert.equal(ctx.normalizeProviderBrandKey('Netflix Basic'), 'netflix');
+  assert.equal(ctx.normalizeProviderBrandKey('Netflix Premium'), 'netflix');
+});
+
+test('normalizeProviderBrandKey: generalizes beyond Netflix -- Hulu/Peacock ad-tier variants also collapse', () => {
+  assert.equal(ctx.normalizeProviderBrandKey('Hulu'), 'hulu');
+  assert.equal(ctx.normalizeProviderBrandKey('Hulu Ads'), 'hulu');
+  assert.equal(ctx.normalizeProviderBrandKey('Hulu Basic'), 'hulu');
+  assert.equal(ctx.normalizeProviderBrandKey('Peacock Standard with Ads'), 'peacock');
+  assert.equal(ctx.normalizeProviderBrandKey('Peacock'), 'peacock');
+});
+
+test('parseTmdbProvidersResponse: "Netflix" and "Netflix Standard with Ads" collapse into a single "Netflix" pill', () => {
+  const json = flatrateJson(['Netflix', 'Netflix Standard with Ads']);
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(json), ['Netflix']);
+});
+
+test('parseTmdbProvidersResponse: plain name wins the display slot regardless of which order TMDB returns them in', () => {
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(flatrateJson(['Netflix', 'Netflix Standard with Ads'])), ['Netflix']);
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(flatrateJson(['Netflix Standard with Ads', 'Netflix'])), ['Netflix']);
+});
+
+test('parseTmdbProvidersResponse: only an ad-tier variant present (no plain version) still surfaces something, not dropped', () => {
+  const json = flatrateJson(['Netflix Standard with Ads']);
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(json), ['Netflix Standard with Ads']);
+});
+
+test('parseTmdbProvidersResponse: distinct real services never over-merge -- Netflix and Hulu both still appear', () => {
+  const json = flatrateJson(['Netflix', 'Netflix Standard with Ads', 'Hulu']);
+  const result = ctx.parseTmdbProvidersResponse(json);
+  assert.deepEqual(result, ['Netflix', 'Hulu']);
+});
+
+test('parseTmdbProvidersResponse: multiple genuinely distinct services with ad-tier variants each collapse independently', () => {
+  const json = flatrateJson(['Netflix', 'Hulu', 'Netflix Standard with Ads', 'Hulu Basic', 'Peacock Premium']);
+  assert.deepEqual(ctx.parseTmdbProvidersResponse(json), ['Netflix', 'Hulu', 'Peacock Premium']);
+});
+
+// ---------------------------------------------------------------------------
 // Quotes (Google Gemini API)
 // ---------------------------------------------------------------------------
 

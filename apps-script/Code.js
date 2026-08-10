@@ -20,10 +20,21 @@ var DETAILS_CACHE_TTL_SECONDS = 6 * 60 * 60;
 
 // Gemini Flash: fast, cheap-to-free, and its free tier needs no billing
 // account (SPEC.md's whole reason for choosing it over the Anthropic API).
-// Model names on Google's side move around -- if this one gets retired,
-// swap it here and in README.md's Script Properties/setup docs, nowhere
-// else references it.
-var GEMINI_MODEL = 'gemini-2.0-flash-lite';
+//
+// Google retires model versions on a real cadence, not a hypothetical one:
+// the original pick here (gemini-2.0-flash-lite) was retired 2026-06-01,
+// which silently degraded every quote-generation call to the (indistinguishable
+// from the outside) "no quotes" empty-array fail-safe -- a *permanent*
+// failure wearing a *transient*-failure costume, so it went unnoticed until
+// a product owner report. There is no code-level guardrail against a vendor
+// deprecating a model out from under us; the mitigation is procedural --
+// before touching this line, check Google's CURRENT model list at
+// https://ai.google.dev/gemini-api/docs/models (not memory, not this
+// comment) for a free-tier-eligible Flash/Flash-Lite model, update it here
+// AND in README.md's Script Properties/setup docs (nowhere else references
+// it), and if quotes ever silently stop populating in production again,
+// this retirement is the first thing to check.
+var GEMINI_MODEL = 'gemini-3.1-flash-lite';
 var GEMINI_GENERATE_CONTENT_URL = 'https://generativelanguage.googleapis.com/v1beta/models/' +
   GEMINI_MODEL + ':generateContent';
 

@@ -512,6 +512,33 @@ function buildTmdbProvidersUrl(apiKey, tmdbMovieId) {
     '/watch/providers?api_key=' + encodeURIComponent(apiKey || '');
 }
 
+// Tier/qualifier words TMDB appends to a provider's plain brand name to list
+// an ad-supported (or other tier) variant as its own separate provider
+// entry -- e.g. "Netflix" and "Netflix Standard with Ads" are the same
+// underlying service. Order matters: multi-word phrases must be stripped
+// before the single words they contain ("with ads" before "ads"), or
+// stripping "ads" first leaves a dangling "with" that "with ads" can no
+// longer match. Not Netflix-specific -- TMDB applies the same pattern to
+// Hulu, Peacock, and others, so this generalizes to any service name.
+var PROVIDER_TIER_QUALIFIERS = ['with ads', 'ads', 'standard', 'basic', 'premium'];
+
+/**
+ * Normalize a TMDB provider name to a brand key for dedup purposes (see
+ * PROVIDER_TIER_QUALIFIERS above). Lowercases, strips known tier/qualifier
+ * words wherever they appear, and collapses the resulting whitespace --
+ * both "Netflix" and "Netflix Standard with Ads" normalize to "netflix".
+ * Plain string split/join (not RegExp) since qualifiers are fixed
+ * words/phrases, not patterns, and this sidesteps regex-special-character
+ * escaping entirely.
+ */
+function normalizeProviderBrandKey(name) {
+  var key = name.toLowerCase();
+  PROVIDER_TIER_QUALIFIERS.forEach(function (qualifier) {
+    key = key.split(qualifier).join(' ');
+  });
+  return key.replace(/\s+/g, ' ').trim();
+}
+
 /**
  * Parse a TMDB `watch/providers` response into a plain list of provider
  * names for the fixed `US` region (per SPEC.md -- there's no per-user
@@ -521,21 +548,49 @@ function buildTmdbProvidersUrl(apiKey, tmdbMovieId) {
  * subscription service is. Missing region/data (or a malformed response)
  * yields an empty list, never an error -- an empty result is a valid,
  * expected state per SPEC.md.
+ *
+ * Dedupes by normalized brand (see normalizeProviderBrandKey), not raw
+ * exact string, so an ad-tier variant doesn't show up as a redundant
+ * second pill alongside the plain service name. When multiple raw names
+ * collapse to the same brand, the plain (unqualified) name wins the
+ * display slot if one exists among the duplicates -- it's the more
+ * recognizable name for the UI; if every variant for a brand has a
+ * qualifier (no plain version present at all), the first one encountered
+ * is kept as-is rather than inventing a cleaned-up display name. Distinct
+ * services never merge -- this only collapses genuine tier variants of the
+ * *same* brand key.
  */
 function parseTmdbProvidersResponse(tmdbJson) {
   if (!tmdbJson || !tmdbJson.results || !tmdbJson.results.US) return [];
   var us = tmdbJson.results.US;
   var flatrate = Array.isArray(us.flatrate) ? us.flatrate : [];
-  var seen = {};
-  var names = [];
+
+  var byBrand = {}; // brandKey -> { displayName, isPlain }
+  var brandOrder = [];
+
   flatrate.forEach(function (entry) {
-    var name = entry && entry.provider_name;
-    if (typeof name === 'string' && name.trim() !== '' && !seen[name]) {
-      seen[name] = true;
-      names.push(name);
+    var rawName = entry && entry.provider_name;
+    if (typeof rawName !== 'string' || rawName.trim() === '') return;
+    var trimmedName = rawName.trim();
+    var brandKey = normalizeProviderBrandKey(trimmedName);
+    if (brandKey === '') return; // stripped down to nothing brand-like -- skip
+
+    var isPlain = brandKey === trimmedName.toLowerCase();
+
+    if (!Object.prototype.hasOwnProperty.call(byBrand, brandKey)) {
+      byBrand[brandKey] = { displayName: trimmedName, isPlain: isPlain };
+      brandOrder.push(brandKey);
+    } else if (isPlain && !byBrand[brandKey].isPlain) {
+      // A plain name for this brand showed up after a qualified one --
+      // upgrade the display name, first plain name wins from here on.
+      byBrand[brandKey].displayName = trimmedName;
+      byBrand[brandKey].isPlain = true;
     }
   });
-  return names;
+
+  return brandOrder.map(function (brandKey) {
+    return byBrand[brandKey].displayName;
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -530,6 +530,24 @@ test('doGet details: returns streamingPlatforms and quotes for a valid id', () =
   assert.equal(fetchMock.calls.length, 3);
 });
 
+test('doGet details: the Gemini request targets a current, non-retired model string', () => {
+  // Regression guard for a real production incident: the original model
+  // (gemini-2.0-flash-lite) was retired by Google on 2026-06-01, which
+  // silently degraded every quote-generation call to the same "no quotes
+  // found" empty-array fail-safe a genuinely transient failure produces --
+  // so quotes never populated in production and nothing caught it until a
+  // user report. Asserting the exact model string in the outgoing request
+  // means a future silent revert to a retired model fails CI instead of
+  // shipping unnoticed.
+  const { context, fetchMock } = setUp(buildSheetValuesV2(), undefined, detailsResponder);
+  context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+
+  const geminiCall = fetchMock.calls.find((c) => c.url.includes('generativelanguage.googleapis.com'));
+  assert.ok(geminiCall, 'expected a call to the Gemini generateContent endpoint');
+  assert.match(geminiCall.url, /\/models\/gemini-3\.1-flash-lite:generateContent$/);
+  assert.equal(geminiCall.url.includes('gemini-2.0-flash-lite'), false, 'must not have silently reverted to the retired model');
+});
+
 test('doGet details: unknown id returns not_found without calling TMDB or Gemini', () => {
   const { context, fetchMock } = setUp(buildSheetValuesV2(), undefined, detailsResponder);
   const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '999' } });
@@ -630,6 +648,31 @@ test('doGet details: a title with multiple TMDB entries across years resolves st
   const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '2' } });
   const body = res.json();
   assert.deepEqual(body.streamingPlatforms, ['Disney+']);
+});
+
+test('doGet details: ad-tier variants of the same service collapse into one pill, end to end', () => {
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) {
+      return {
+        results: {
+          US: {
+            flatrate: [
+              { provider_name: 'Netflix' },
+              { provider_name: 'Netflix Standard with Ads' },
+              { provider_name: 'Hulu' }
+            ]
+          }
+        }
+      };
+    }
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: JSON.stringify([]) }] } }] };
+    }
+    return { results: [{ id: 603, poster_path: '/p.jpg' }] };
+  };
+  const { context } = setUp(buildSheetValuesV2(), undefined, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '3' } });
+  assert.deepEqual(res.json().streamingPlatforms, ['Netflix', 'Hulu']);
 });
 
 test('doGet details: a non-200 Gemini response (e.g. invalid API key) degrades to empty quotes and is not cached', () => {

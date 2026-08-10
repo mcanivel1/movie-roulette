@@ -744,3 +744,58 @@ test('QA: a year-matched TMDB result with no poster_path resolves to posterUrl: 
   const posterColIdx = HEADER_V2.indexOf('Poster URL');
   assert.equal(sheet._snapshot()[1][posterColIdx], 'none', 'the "no match" sentinel should be cached, not the wrong-year URL');
 });
+
+// ---------------------------------------------------------------------------
+// Streaming platforms: normalizeProviderBrandKey's qualifier stripping
+// (bug B fix) uses plain substring split/join against a fixed word list
+// ('with ads', 'ads', 'standard', 'basic', 'premium'), not word-boundary
+// matching. That's safe against every provider TMDB's US catalog actually
+// contains today, but it's a real latent fragility worth documenting
+// explicitly: a hypothetical (or future TMDB-added) brand name that merely
+// *contains* one of those words as a substring -- not as a separate
+// qualifier word -- would get corrupted, not just de-qualified. Flagging to
+// backend-dev as a known limitation rather than a live bug, since nothing
+// in TMDB's current provider list triggers it.
+// ---------------------------------------------------------------------------
+
+test('QA: qualifier stripping is substring-anywhere, not word-boundary-safe -- a brand name that merely contains a qualifier word gets corrupted (documents a latent fragility, not a live bug against today\'s TMDB catalog)', () => {
+  const { loadGasContext: load } = require('./helpers');
+  const ctx = load(['Logic.js']);
+  // "Radsson+" is not a real TMDB provider -- constructed purely to show
+  // 'ads' matching inside an unrelated word ("r-ADS-son+") rather than as
+  // its own qualifier token. If a real provider ever ships a name like this,
+  // its pill would silently show mangled text instead of the real name.
+  assert.equal(ctx.normalizeProviderBrandKey('Radsson+'), 'r son+', 'documents that "ads" strips mid-word, not just as a standalone qualifier -- worth a word-boundary fix if this class of name ever appears in TMDB\'s real catalog');
+});
+
+test('QA: a provider name that strips down to nothing (matches only qualifier words, no brand left) is dropped, not shown as a blank pill', () => {
+  const values = [HEADER_V2, [false, 'Whatever', 2020, '', '', '', true, true, true, true, true, true, true, true]];
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) {
+      return { results: { US: { flatrate: [{ provider_name: 'Standard' }, { provider_name: 'Netflix' }] } } };
+    }
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '[]' }] } }] };
+    }
+    return { results: [{ id: 1, poster_path: '/p.jpg' }] }; // TMDB title search -> resolves a movie id
+  };
+  const { context } = setUpV2(values, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '2' } });
+  assert.deepEqual(res.json().streamingPlatforms, ['Netflix'], 'a name that normalizes to an empty brand key must be silently skipped, not shown as an empty/blank pill');
+});
+
+test('QA: multiple qualified variants of the same brand with no plain version anywhere keep the first-encountered name deterministically', () => {
+  const values = [HEADER_V2, [false, 'Whatever', 2020, '', '', '', true, true, true, true, true, true, true, true]];
+  const responder = (url) => {
+    if (url.includes('/watch/providers')) {
+      return { results: { US: { flatrate: [{ provider_name: 'Netflix Standard with Ads' }, { provider_name: 'Netflix Premium' }] } } };
+    }
+    if (url.includes('generativelanguage.googleapis.com')) {
+      return { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '[]' }] } }] };
+    }
+    return { results: [{ id: 1, poster_path: '/p.jpg' }] };
+  };
+  const { context } = setUpV2(values, responder);
+  const res = context.doGet({ parameter: { token: SHARED_TOKEN, action: 'details', id: '2' } });
+  assert.deepEqual(res.json().streamingPlatforms, ['Netflix Standard with Ads'], 'with no plain "Netflix" ever appearing, the first-seen qualified name should win rather than switching mid-list to the second qualified variant');
+});

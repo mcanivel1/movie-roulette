@@ -74,12 +74,29 @@ request limits that a small group app running one request per movie (cached
 for hours afterward — see "Notes for whoever deploys this" at the bottom of
 this file) won't come close to hitting.
 
-The backend calls the `gemini-2.0-flash-lite` model (Code.js's
-`GEMINI_MODEL` constant) — Google renames/retires model versions over time,
-so if quote generation starts failing, check
-[ai.google.dev's model list](https://ai.google.dev/gemini-api/docs/models)
-for a current free-tier-eligible Flash/Flash-Lite model and update that one
-constant.
+The backend calls the `gemini-3.1-flash-lite` model (Code.js's `GEMINI_MODEL`
+constant), currently free-tier-eligible with generous per-minute/per-day
+limits (30 requests/minute, 1,500 requests/day as of this writing) — far
+more than a small group app running one request per movie (cached for hours
+afterward) will ever approach.
+
+**Google retires Gemini model versions on a real cadence.** This has already
+happened once in this project: the original pick (`gemini-2.0-flash-lite`)
+was retired 2026-06-01, and every quote-generation call silently failed
+model-not-found from that point on. The backend's fail-safe design (SPEC.md)
+correctly degrades any single failed request to an empty quotes array with
+nothing cached — exactly right for a *transient* TMDB/Gemini hiccup, but a
+retired model is a *permanent* failure wearing that same "empty array,
+nothing cached" costume, so it went unnoticed until a product owner report
+that quotes had simply never worked.
+
+**If quotes stop populating in production, check this first** — a retired
+model is a more likely culprit than an actual bug. Check
+[ai.google.dev's current model list](https://ai.google.dev/gemini-api/docs/models)
+for a free-tier-eligible Flash/Flash-Lite model (don't trust this README or
+your own memory — that list is the only source of truth for what's current)
+and update `GEMINI_MODEL` in Code.js (and this paragraph, so the next person
+isn't debugging the same thing blind).
 
 ## 3. Create the Google Sheet (if you don't already have one)
 
